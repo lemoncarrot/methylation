@@ -1,0 +1,181 @@
+---
+title: "Age-Related Patterns of DNA Methylation Changes"
+output: html_notebook
+---
+
+Load all required packages
+
+```{r}
+library(data.table)
+library(ggplot2)
+library(dplyr)
+
+```
+
+Initialize all paths for conciseness
+
+```{r}
+metadata_path <- "/Users/kchen/OneDrive/Documents/methylation/metadata18/"
+beta_path <- "/Users/kchen/OneDrive/Documents/methylation/betas18/"
+combined_path <- "/Users/kchen/OneDrive/Documents/methylation/combined18/"
+datasets <- c("GSE50660", "GSE90124", "GSE40279", "GSE67705", "GSE61256", "GSE73103", "GSE124366",
+              "GSE114134", "GSE89253", "GSE53740", "GSE85568", "GSE106648", "GSE51057", "GSE124076")
+```
+
+Formatting datasets (downloaded directly from OneDrive)
+
+Outputs rows as CpG sites (first row Ages) and columns as samples (last column CpG site identifier)
+
+```{r}
+formatDataset <- function(dataset_name) {
+  # Read beta matrix
+  beta <- read.csv(paste0(beta_path, dataset_name, "_beta.csv"))
+  # Set row names as CpG site identifiers
+  rownames(beta) <- beta[, 1]
+  beta <- beta[, -1]
+  # Read metadata
+  metadata <- read.csv(paste0(metadata_path, dataset_name, "_metadata_cleaned.csv"))
+  # Cut metadata to sample ID and age
+  metadata <- metadata[, c(1, 2)]
+  t_metadata <- as.data.frame(t(metadata))
+  colnames(t_metadata) <- t_metadata[1,]
+  t_metadata <- t_metadata[-1, ]
+  if (all(colnames(t_metadata)==colnames(beta))) {
+    # Combine beta matrix and metadata
+    combined <- rbind(t_metadata, beta)
+  }
+  else {
+    print("Error")
+  }
+  #Set CpG identifiers to last column "cpg" (for data.table support)
+  combined$cpg <- rownames(combined)
+  return(combined)
+}
+# Run code
+datasets <- c("") #list of datasets to be formatted
+
+#for (dataset in datasets) {
+#  temp <- formatDataset(dataset)
+#  write.csv(temp, paste0(combined_path, dataset, "_df.csv"), row.names=FALSE)
+#  rm(temp)
+#  gc()
+#  print(paste0("DONE WITH: ", dataset))
+#}
+```
+
+Find sites present in 11/14 datasets
+
+```{r}
+overlappingSites <- function(beta_path, datasets) {
+  all_sites <- character()
+  #total_samples <- 0
+  
+  #LOop through list of datasets to be examined
+  for (element in datasets) {
+    filepath <- paste0(beta_path, element, "_beta.csv")
+    #sample_names <- fread(filepath, nrows = 1, header = FALSE)[[1]]
+    site_names <- fread(filepath, select = 1, skip = 1)[[1]]
+    #total_samples <- total_samples + length(sample_names)
+    #all sites
+    all_sites <- c(all_sites, site_names)
+    
+    print(paste("Processing: ", element))
+  }
+  
+  #create table of all sites and their frequency across datasets
+  site_counts <- table(all_sites)
+  cutoff_number <- 11
+  overlap <- names(site_counts)[site_counts >= cutoff_number]
+  
+  output <- data.frame(cpg = overlap, stringsAsFactors=FALSE)
+  return(output)
+}
+
+# Run code
+datasets <- c("GSE50660", "GSE90124", "GSE40279", "GSE67705", "GSE61256", "GSE73103", "GSE124366",
+              "GSE114134", "GSE89253", "GSE53740", "GSE85568", "GSE106648", "GSE51057", "GSE124076")
+overlaps <- overlappingSites(beta_path, datasets)
+print(length(overlaps$cpg))
+
+#321565 sites in at least 11 out of 14 training datasets
+
+#save to a file for future analysis
+#write.csv(overlaps, "6_20_cpgfilter1.csv")
+```
+Initialize for further analysis
+
+```{r}
+#START PRE INITIALIZING CHUNK
+# all datasets
+training_datasets <- c("GSE50660", "GSE90124", "GSE40279", "GSE67705", "GSE61256", "GSE73103", "GSE124366")
+testing_datasets <- c("GSE114134", "GSE89253", "GSE53740", "GSE85568", "GSE106648", "GSE51057", "GSE124076")
+# Define input path
+combined_path <- "/Users/kchen/OneDrive/Documents/methylation/combined18/"
+# Read desired CpG sites from overlappingSites()
+initial_cpg_list <- read.csv("6_20_cpgfilter1.csv")[, 2] #could change in future based on cpg used filtering process
+# Extract number of sites
+NUMCPGSITE <- length(initial_cpg_list)
+# Define chunk length
+sites_per_list <- 30000
+# Define group number
+num_groups <- ceiling(NUMCPGSITE/sites_per_list)
+#11 partitions as of 6/15
+# Split CpG sites into chunks
+split_lists <- vector("list", num_groups)
+for (i in 1:num_groups) {
+  start_index <- (i-1)*sites_per_list + 1
+  end_index <- min(i*sites_per_list, NUMCPGSITE)
+  split_lists[[i]] <- initial_cpg_list[start_index:end_index]
+}
+
+training_subset_folder <- "/Users/kchen/OneDrive/Documents/methylation/training_split/"
+testing_subset_folder <- "/Users/kchen/OneDrive/Documents/methylation/testing_split/"
+#END PRE INITIALIZING CHUNK
+```
+
+Split datasets into chunks of 30,000 sites x N samples
+11 chunks in all
+
+```{r}
+standardizeDataset <- function(df_name, desired_cpgs) {
+  df <- readr::read_csv(paste0(combined_path, df_name, "_df.csv"))
+  
+  # Extract ages
+  ages <- df[1, ]
+  df <- df[-1, ]
+  template <- data.table(cpg=desired_cpgs)
+  # Reorder and filter by reference CpG sites
+  df <- merge(template, df, by.x="cpg", by.y="cpg", all.x=TRUE, sort=FALSE)
+  # Reattach ages
+  df <- rbind(ages, df)
+  
+  return(df)
+}
+
+makeChunks <- function(datasets, split_site_list, output_folder) {
+  count <- 1
+  for (site_list in split_site_list) {
+    temp <- data.frame()
+    for (dataset in datasets) {
+      df <- standardizeDataset(dataset, site_list)
+      if (ncol(temp)==0) {
+        temp <- df
+      }
+      else {
+        temp <- cbind(temp, df)
+      }
+    }
+    write.csv(temp, file=paste0(output_folder, "partition_", count, ".csv"), row.names=TRUE)
+    count <- count + 1
+  }
+}
+
+# Run code
+#makeChunks(training_datasets, split_lists, training_subset_folder)
+#makeChunks(testing_datasets, split_lists, testing_subset_folder)
+```
+
+
+
+
+When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Ctrl+Shift+K* to preview the HTML file).
