@@ -16,6 +16,8 @@ library(corrplot)
 library(tidyr)
 library(tibble)
 library(sparcl)
+library(splines)
+library(tidyverse)
 ```
 
 Initialize all paths for conciseness
@@ -109,6 +111,7 @@ print(length(overlaps$cpg))
 #save to a file for future analysis
 #write.csv(overlaps, "6_20_cpgfilter1.csv")
 ```
+
 Initialize for further analysis
 
 ```{r}
@@ -260,7 +263,7 @@ results_by_window <- filterCorrelationsAndChange(num_groups, training=TRUE)
 
 #print length of each list
 for (i in 1:length(results_by_window)) {
-  print(paste0("Start age: ", (i-1)*5+5, " End age: ", (i-1)*5+25, " Num CpG sites r>0.4 & Abs Change>=0.15: ", length(results_by_window[[i]])))
+  print(paste0("Start age: ", (i-1)*5+5, " End age: ", (i-1)*5+25, " Num CpG sites r>0.4 & Abs Change>=0.2: ", length(results_by_window[[i]])))
 }
 
 #print total unique sites
@@ -272,6 +275,7 @@ print(length(unique_cpg_sites))
 sorted_unique_cpg_sites <- sort(unique_cpg_sites)
 write.csv(sorted_unique_cpg_sites, "6_20_cpgfilter2.csv")
 ```
+
 Filter for sites that have variance > 0.01
 46,233 sites left after filtering
 
@@ -310,11 +314,11 @@ sites_filtered2 <- varianceFilter(num_groups, "6_20_cpgfilter2.csv", training=TR
 print(length(sites_filtered2))
 write.csv(sites_filtered2, "6_20_cpgfilter3.csv")
 ```
-
+        
 Generate an i x j matrix, where i are CpG sites and j is ages 0-100
 Params: training = TRUE is training, training = FALSE is testing
         average = TRUE is generate an avg_beta matrix, average = FALSE is generate a variance matrix (actually standard deviations)
-        
+
 ```{r}
 generateMatrix <- function(file_with_pre_filter, num_splits=num_groups, training=TRUE, average) {
   sites <- read.csv(file_with_pre_filter)
@@ -453,6 +457,7 @@ second_filter <- filterBySDComparison("6_20_variance_matrix_v1.csv", "6_20_train
 print(length(second_filter))
 #write.csv(second_filter, "6_20_cpgfilter4.csv")
 ```
+
 Regenerate training and testing matrices using generateMatrix() function to move onto clustering
 
 ```{r}
@@ -587,8 +592,98 @@ New clustering code here (in progress)
 
 ```{r}
 df_matrix <- as.matrix(df)
-km.perm <- KMeansSparseCluster.permute(df_matrix,K=2,wbounds=seq(3,7,len=15),nperms=5)
+set.seed(123)  # For reproducibility
+km.perm <- KMeansSparseCluster.permute(df_matrix, K = 2:10, wbounds = seq(3, 7, len = 15), nperms = 5)
+print(km.perm)
 plot(km.perm)
-km.out <- KMeansSparseCluster(df_matrix, K=2,wbounds=km.perm$bestw)
+optimal_k <- which.max(km.perm$gaps)  # Identify the optimal number of clusters
+best_w <- km.perm$bestw  # Get the best tuning parameter
+km.out <- KMeansSparseCluster(df_matrix, K = optimal_k, wbounds = best_w)
+print(km.out)
+plot(km.out)
+df$cluster <- km.out[[1]]$Cs
+df <- df[order(df$cluster),]
+```
+
+Plot cluster results
+
+```{r}
+pheatmap(as.matrix(df[, -ncol(df)]),  # Exclude cluster column
+         scale = "none",
+         show_rownames = FALSE,
+         show_colnames = TRUE,
+         cluster_cols = FALSE,
+         cluster_rows = FALSE,
+         color = colorRampPalette(c("blue", "white", "red"))(100),
+         fontsize_col = 6,
+         angle_col = 45,
+         main="Training",
+         breaks = seq(-5, 5, length.out = 101)
+         )
+```
+Order testing exactly like training
+
+```{r}
+df_order <- rownames(df)
+df2 <- df2[df_order,]
+```
+
+Plot testing
+
+```{r}
+pheatmap(as.matrix(df2),  # Exclude cluster column
+         scale = "none",
+         show_rownames = FALSE,
+         show_colnames = TRUE,
+         cluster_cols = FALSE,
+         cluster_rows = FALSE,
+         color = colorRampPalette(c("blue", "white", "red"))(100),
+         fontsize_col = 6,
+         angle_col = 45,
+         main="Testing",
+         breaks = seq(-5, 5, length.out = 101)
+         )
+```
+
+Generate Plots
+
+```{r}
+for (i in 1:num_clusters) {
+  temp_df <- df[df$cluster == i, ]
+  ident <- rownames(temp_df)
+  temp_df2 <- df2[ident, ]
+  
+  long_df_test <- temp_df2 %>%
+    rownames_to_column(var = "Sample") %>%
+    pivot_longer(cols = -c(Sample), names_to = "Age", values_to = "Beta") %>%
+    mutate(Age = as.numeric(sub("age_", "", Age)))
+  
+  long_df_train <- temp_df %>%
+    rownames_to_column(var = "Sample") %>%
+    pivot_longer(cols = -c(Sample, cluster), names_to = "Age", values_to = "Beta") %>%
+    mutate(Age = as.numeric(sub("age_", "", Age)))
+  
+  #fit <- loess(Beta ~ Age, data = long_df, span = 0.3)
+  fit <- lm(Beta ~ bs(Age, df = 5), data = long_df_train)
+  fit2 <- lm(Beta ~ bs(Age, df = 5), data = long_df_test)
+  long_df_test$Fitted <- predict(fit2)
+  long_df_train$Fitted <- predict(fit)
+  
+  
+  
+  p <- ggplot(long_df_test, aes(x = Age, y = Beta)) +
+    geom_point(size = 1) +
+    geom_line(aes(y = Fitted), color = "blue") +
+    labs(title = paste("Test Cluster", i), x = "Age", y = "Scaled Beta Values") +
+    theme_minimal()
+  print(p)
+  
+  q <- ggplot(long_df_train, aes(x = Age, y = Beta)) +
+    geom_point(size=1) +
+    geom_line(aes(y = Fitted), color = "blue") +
+    labs(title = paste("Train Cluster", i), x = "Age", y = "Scaled Beta Values") +
+    theme_minimal()
+  print(q)
+}
 ```
 
