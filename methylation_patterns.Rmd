@@ -592,18 +592,55 @@ New clustering code here (in progress)
 
 ```{r}
 df_matrix <- as.matrix(df)
-set.seed(123)  # For reproducibility
-km.perm <- KMeansSparseCluster.permute(df_matrix, K = 2:10, wbounds = seq(3, 7, len = 15), nperms = 5)
-print(km.perm)
-plot(km.perm)
-optimal_k <- which.max(km.perm$gaps)  # Identify the optimal number of clusters
-best_w <- km.perm$bestw  # Get the best tuning parameter
+
+# Set seed for reproducibility
+set.seed(123)
+
+# Initialize variables to store results
+results <- list()
+gaps <- numeric()
+
+# Test for a range of K values
+for (k in 2:10) {
+  km.perm <- KMeansSparseCluster.permute(df_matrix, K = k, wbounds = seq(3, 7, len = 15), nperms = 5)
+  results[[k]] <- km.perm
+  gaps[k] <- max(km.perm$gaps)
+}
+
+optimal_k <- which.max(gaps)
+cat("Optimal number of clusters:", optimal_k, "\n")
+
+best_w <- results[[optimal_k]]$bestw
 km.out <- KMeansSparseCluster(df_matrix, K = optimal_k, wbounds = best_w)
 print(km.out)
 plot(km.out)
-df$cluster <- km.out[[1]]$Cs
-df <- df[order(df$cluster),]
 ```
+
+Try time series clustering
+
+```{r}
+time_series_list <- tslist(df2)
+n_clusters <- 7
+clustering_result <- tsclust(time_series_list, type = "partitional", k = n_clusters, distance = "dtw_basic", seed = 123, trace = TRUE)
+plot(clustering_result)
+print(clustering_result@cluster)
+  
+cluster_centers <- clustering_result@centroids
+print(cluster_centers)
+summary(clustering_result)
+
+
+
+```
+Assign clusters back to df and order
+```{r}
+df$cluster <- clustering_result@cluster
+df <- df[order(df$cluster),]
+df_order <- rownames(df)
+df2 <- df2[df_order, ]
+```
+
+
 
 Plot cluster results
 
@@ -669,6 +706,12 @@ for (i in 1:num_clusters) {
   long_df_test$Fitted <- predict(fit2)
   long_df_train$Fitted <- predict(fit)
   
+  q <- ggplot(long_df_train, aes(x = Age, y = Beta)) +
+    geom_point(size=1) +
+    geom_line(aes(y = Fitted), color = "blue") +
+    labs(title = paste("Train Cluster", i), x = "Age", y = "Scaled Beta Values") +
+    theme_minimal()
+  print(q)
   
   
   p <- ggplot(long_df_test, aes(x = Age, y = Beta)) +
@@ -678,12 +721,6 @@ for (i in 1:num_clusters) {
     theme_minimal()
   print(p)
   
-  q <- ggplot(long_df_train, aes(x = Age, y = Beta)) +
-    geom_point(size=1) +
-    geom_line(aes(y = Fitted), color = "blue") +
-    labs(title = paste("Train Cluster", i), x = "Age", y = "Scaled Beta Values") +
-    theme_minimal()
-  print(q)
 }
 ```
 
