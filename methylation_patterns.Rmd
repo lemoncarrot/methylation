@@ -640,6 +640,7 @@ B <- fread("7_21_all_matrix_avg.csv")
 B <- as.data.frame(B)
 rownames(B) <- B[, 1]
 B <- B[, -1]
+B <- B[, -c(82:101)]
 
 sub_B <- B[rownames(B) %in% temp_sites, ]
 print(paste0("Percent NA: ", sum(is.na(sub_B)) / (dim(sub_B)[1] * dim(sub_B)[2]) * 100))
@@ -651,6 +652,7 @@ B <- fread("7_22_male_matrix_avg.csv")
 B <- as.data.frame(B)
 rownames(B) <- B[, 1]
 B <- B[, -1]
+B <- B[, -c(82:101)]
 
 sub_B <- B[rownames(B) %in% temp_sites, ]
 print(paste0("Percent NA B Male: ", sum(is.na(sub_B)) / (dim(sub_B)[1] * dim(sub_B)[2]) * 100))
@@ -662,6 +664,7 @@ B <- fread("7_22_female_matrix_avg.csv")
 B <- as.data.frame(B)
 rownames(B) <- B[, 1]
 B <- B[, -1]
+B <- B[, -c(82:101)]
 
 sub_B <- B[rownames(B) %in% temp_sites, ]
 print(paste0("Percent NA B Female: ", sum(is.na(sub_B)) / (dim(sub_B)[1] * dim(sub_B)[2]) * 100))
@@ -987,8 +990,8 @@ mainPipeline <- function(num_clusters, save=FALSE, clock=FALSE, gender_state=1) 
   colnames(B) <- gsub("age_", "", colnames(B))
   rownames(B) <- cpg_filter
   
-  # Remove last NA ages
-  B <- B[, colSums(is.na(B)) < nrow(B)]
+  # Remove ages 81-100
+  B <- B[, -c(82:101)]
   
   # Fill in sparse NA values using linear interpolation
   B <- t(apply(B, 1, interpolate_na))
@@ -1057,16 +1060,16 @@ mainPipeline <- function(num_clusters, save=FALSE, clock=FALSE, gender_state=1) 
 ```
 
 ```{r}
-all_B1_1 <- mainPipeline(4, save=TRUE, clock=TRUE, gender_state=1)
+all_B1_1 <- mainPipeline(4, save=FALSE, clock=TRUE, gender_state=1)
 ```
 
 
 ```{r}
-all_B1_2 <- mainPipeline(5, save=TRUE, clock=TRUE, gender_state=1)
+all_B1_2 <- mainPipeline(5, save=FALSE, clock=TRUE, gender_state=1)
 ```
 
 ```{r}
-all_B1_3 <- mainPipeline(6, save=TRUE, clock=TRUE, gender_state=1)
+all_B1_3 <- mainPipeline(6, save=FALSE, clock=TRUE, gender_state=1)
 ```
 
 ```{r}
@@ -1082,17 +1085,15 @@ all_B2_1 <- mainPipeline(6, save=FALSE, clock=FALSE, gender_state=1)
 ```
 
 ```{r}
-all_B3_1 <- mainPipeline(4, save=TRUE, clock=FALSE, gender_state=2)
+all_B3_1 <- mainPipeline(4, save=FALSE, clock=FALSE, gender_state=2)
 ```
 
 ```{r}
-all_B4_1 <- mainPipeline(4, save=TRUE, clock=FALSE, gender_state=3)
+all_B4_1 <- mainPipeline(4, save=FALSE, clock=FALSE, gender_state=3)
 ```
 
+Enrichment of CpG sites in each cluster
 
-# Below is not run yet // need to refactor
-
-# Initialize Annotation Matrix // need to refactor
 ```{r}
 
 ```
