@@ -18,6 +18,12 @@ library(tibble)
 library(sparcl)
 library(splines)
 library(tidyverse)
+library(readxl)
+library(tools)
+library(sesame)
+library(ggpubr)
+library(ComplexHeatmap)
+library(DunedinPACE)
 ```
 
 Initialize all paths for conciseness
@@ -26,174 +32,1093 @@ Initialize all paths for conciseness
 metadata_path <- "/Users/kchen/OneDrive/Documents/methylation/metadata18/"
 beta_path <- "/Users/kchen/OneDrive/Documents/methylation/betas18/"
 combined_path <- "/Users/kchen/OneDrive/Documents/methylation/combined18/"
-datasets <- c("GSE50660", "GSE90124", "GSE40279", "GSE67705", "GSE61256", "GSE73103", "GSE124366",
-              "GSE114134", "GSE89253", "GSE53740", "GSE85568", "GSE106648", "GSE51057", "GSE124076")
+#datasets <- c("GSE50660", "GSE90124", "GSE40279", "GSE67705", "GSE61256", "GSE73103", "GSE124366",
+#              "GSE114134", "GSE89253", "GSE53740", "GSE85568", "GSE106648", "GSE51057", "GSE124076",
+#              "GSE32148", "GSE80261", "GSE137495", "GSE36054", "GSE138279", "GSE94734", "GSE137502", "GSE50759")
 ```
+
+GSE89253 and GSE50759 need transformation from M-values to Beta
+
+```{r}
+checkBeta <- function(dataset_path, write=TRUE) {
+  file_path <- paste0(beta_path, dataset_path)
+  file_ext <- file_ext(file_path)
+  if (write==TRUE) {
+    if (file_ext=="csv") {
+      temp <- fread(file_path) 
+      dataset_name <- gsub("_beta.csv", "", dataset_path)
+    } else {
+      dataset_name <- gsub("_beta.xlsx", "", dataset_path)
+      sheet_names <- excel_sheets(file_path)
+      temp <- lapply(sheet_names, function(sheet) {
+        read_excel(file_path, sheet=sheet)
+      }) %>% bind_rows()
+    }
+    temp <- as.data.frame(temp)
+    rownames(temp) <- temp[, 1]
+    temp <- temp[, -1]
+    btom <- function(m) {
+      2^m/(1+2^m)
+    }
+    temp_t <- apply(temp, c(1, 2), btom)
+    temp_t <- as.data.frame(temp_t)
+    fwrite(temp_t, paste0(dataset_name, "_beta.csv"), row.names=TRUE)
+    return(NULL)
+  } else {
+    if (file_ext == "csv") {
+      temp <- fread(file_path, nrows = 100) 
+      dataset_name <- gsub("_beta.csv", "", dataset_path)
+    } else {
+      dataset_name <- gsub("_beta.xlsx", "", dataset_path)
+      sheet_names <- excel_sheets(file_path)
+      temp <- lapply(sheet_names, function(sheet) {
+        read_excel(file_path, sheet = sheet, range = cell_limits(c(1, 1), c(100, 10)))
+      }) %>% bind_rows()
+    }
+    return(temp)
+  }
+}
+
+# Check list of all beta files
+#list.files(path=beta_path)
+
+# Run
+#check <- checkBeta("GSE137495_beta.xlsx", write=FALSE)
+```
+
+Use mLiftOver to harmonize data from GSE114134 and GSE124076
+
+```{r}
+temp <- fread(paste0(beta_path, "GSE124076_beta.csv"))
+temp <- as.data.frame(temp)
+rownames(temp) <- temp[, 1]
+temp <- temp[, -1]
+temp2 <- as.matrix(temp)
+rownames(temp2) <- rownames(temp)
+
+# Lift over betas
+betas <- mLiftOver(temp2, "HM450", impute=F)
+
+# Lift over site names
+#sites <- rownames(betas)
+#new_sites <- convertProbeID(sites, "HM450")
+
+df_long <- melt(temp2)
+colnames(df_long) <- c("Sample", "BetaValue")
+ggplot(df_long, aes(x = BetaValue)) +
+  geom_histogram(alpha = 0.5, position = "identity", bins = 30) +
+  labs(title = "Original", x = "Beta Value", y = "Count") +
+  theme_minimal()
+
+df_long <- melt(betas)
+colnames(df_long) <- c("Sample", "BetaValue")
+ggplot(df_long, aes(x = BetaValue)) +
+  geom_histogram(alpha = 0.5, position = "identity", bins = 30) +
+  labs(title = "Adjusted", x = "Beta Value", y = "Count") +
+  theme_minimal()
+
+
+# Figure out how to liftover site names (if necessary)
+# Finish liftovers
+
+```
+
+
+Working with metadata: making sure everything is formatted correctly
+- stratify by age
+- filter out cancer (not applicable)
+- GSE114134 has allergic
+- GSE53740 has PSP and FTD (neurological disorders)
+- GSE85568 has asthma: keep
+- GSE106648 has Multiple Sclerosis
+- GSE61256 has obesity
+- GSE32148 has Crohn's disease
+- GSE80261 has fetal alcohol syndrome
+
+```{r}
+# List all files in the metadata directory
+metadata_file_paths <- list.files(path="/Users/kchen/OneDrive/Documents/methylation/metadata18")
+
+filtered_data <- list()
+
+# Read metadata from all files and extract ID, gender, and age columns
+for (i in 1:length(metadata_file_paths)) {
+  file_ext <- file_ext(metadata_file_paths[i])
+  if (file_ext=="csv") {
+    data <- read.csv(paste0("/Users/kchen/OneDrive/Documents/methylation/metadata18/", metadata_file_paths[i]))
+  } else {
+    data <- read_excel(paste0("/Users/kchen/OneDrive/Documents/methylation/metadata18/", metadata_file_paths[i]))
+  }
+  filtered_data[[i]] <- data[, c("sample_id", "gender", "age")]
+}
+
+# Combine all
+combined_metadata <- do.call(rbind, filtered_data)
+combined_metadata <- as.data.frame(combined_metadata)
+
+# Filter out samples without age values
+combined_metadata <- combined_metadata[!is.na(combined_metadata$age), ]
+# 4902 samples left
+
+male_sample_ids <- which(combined_metadata$gender=="male" | combined_metadata$gender=="M" | combined_metadata$gender=="Male")
+# 2161 males
+female_sample_ids <- which(combined_metadata$gender=="female" | combined_metadata$gender=="F" | combined_metadata$gender=="Female")
+# 2642 females
+
+NA_gender <- combined_metadata$sample_id[is.na(combined_metadata$gender)]
+# 99 NA gender
+
+all_samples <- combined_metadata$sample_id
+male_samples <- combined_metadata$sample_id[male_sample_ids]
+female_samples <- combined_metadata$sample_id[female_sample_ids]
+
+# Always do colnames %in% specified gender for further analyses
+
+combined_metadata$age <- as.numeric(combined_metadata$age)
+
+# Plot age distribution for all samples
+gghistogram(combined_metadata, x="age", binwidth=1, fill="#FDFD96") +
+  scale_x_continuous(limits=c(0, 100), breaks=seq(0, 100, by=5)) +
+  ylim(0, 200) +
+  labs(x="Age", y="Samples", title="All Age Distribution") 
+#ggsave("figure1a.png", plot=last_plot(), dpi=300)
+
+gghistogram(combined_metadata[combined_metadata$sample_id %in% male_samples, ], x="age", binwidth=1, fill="#ADD8E6") +
+  scale_x_continuous(limits=c(0, 100), breaks=seq(0, 100, by=5)) +
+  ylim(0, 200) +
+  labs(x="Age", y="Samples", title="All Age Distribution") 
+#ggsave("figure1b.png", plot=last_plot(), dpi=300)
+
+gghistogram(combined_metadata[combined_metadata$sample_id %in% female_samples, ], x="age", binwidth=1, fill="#FFB6C1") +
+  scale_x_continuous(limits=c(0, 100), breaks=seq(0, 100, by=5)) +
+  ylim(0, 200) +
+  labs(x="Age", y="Samples", title="All Age Distribution") 
+#ggsave("figure1c.png", plot=last_plot(), dpi=300)
+
+# Clean up environment
+rm(data, filtered_data, female_sample_ids, file_ext, i, male_sample_ids, NA_gender)
+```
+
+Extract Clock Sites
+
+```{r}
+Hannum_CpGs <- read_excel("CpGsToInvestigate/hannum_cpgs.xlsx")
+Hannum_CpGs <- Hannum_CpGs$Marker #71
+Levine_CpGs <- read.csv("CpGsToInvestigate/levine_cpgs.csv", stringsAsFactors=FALSE)
+Levine_CpGs <- Levine_CpGs[-1, ]
+Levine_CpGs <- Levine_CpGs$CpG #513
+Horvath_CpGs <- read.csv("CpGsToInvestigate/horvath_cpgs.csv", stringsAsFactors=FALSE)
+Horvath_CpGs <- Horvath_CpGs[-(1:3), 1, drop=FALSE]
+Horvath_CpGs <- Horvath_CpGs[, 1] #353
+McEwen_CpGs <- read.csv("CpGsToInvestigate/mcewen_cpgs.csv")
+McEwen_CpGs <- McEwen_CpGs$CPG #94
+Wu_CpGs <- read_excel("CpGsToInvestigate/aging-11-102399-s003..xlsx")
+Wu_CpGs <- Wu_CpGs[-1, ]
+Wu_CpGs <- Wu_CpGs$CpGs #111
+Belsky_CpGs <- getRequiredProbes(backgroundList=FALSE)
+Belsky_CpGs <- unlist(Belsky_CpGs) #173
+load("CpGsToInvestigate/epitoc.Rd")
+Teschendorff_CpGs <- as.data.frame(dataETOC2.l[1])
+Teschendorff_CpGs <- rownames(Teschendorff_CpGs) #163
+Shireby_CpGs <- readLines("CpGsToInvestigate/CorticalClockCoefs.txt")[-1]
+Shireby_CpGs <- sapply(strsplit(Shireby_CpGs, " "), `[`, 1)
+Shireby_CpGs <- unlist(Shireby_CpGs) #347
+Lu2_CpGs <- read_excel("CpGsToInvestigate/lu2.xlsx")
+Lu2_CpGs <- rbind(colnames(Lu2_CpGs), Lu2_CpGs)
+Lu2_CpGs <- Lu2_CpGs[, 1]
+Lu2_CpGs <- as.character(Lu2_CpGs[[1]]) #140
+clock_cpgs <- list(
+  McEwen_CpGs = McEwen_CpGs,
+  Wu_CpGs = Wu_CpGs,
+  Hannum_CpGs = Hannum_CpGs,
+  Horvath_CpGs = Horvath_CpGs,
+  Levine_CpGs = Levine_CpGs,
+  Belsky_CpGs = Belsky_CpGs,
+  Teschendorff_CpGs = Teschendorff_CpGs,
+  Shireby_CpGs = Shireby_CpGs,
+  Lu2_CpGs = Lu2_CpGs
+)
+
+cpgs <- unlist(clock_cpgs)
+cpgs <- unique(cpgs) #1868 total sites
+
+print(paste0("Total Unique CpG sites from 9 clocks explored: ", length(cpgs)))
+
+#write.csv(cpgs, "7_3_overlap.csv")
+```
+
+Create Upset Plot showing the overlaps in sites between clocks
+
+```{r}
+#list_to_matrix(clock_cpgs)
+m1 <- make_comb_mat(clock_cpgs, mode="intersect")
+UpSet(m1)
+dev.copy(png, "figure2a.png", width=900)
+dev.off()
+```
+
 
 Formatting datasets (downloaded directly from OneDrive)
 
-Outputs rows as CpG sites (first row Ages) and columns as samples (last column CpG site identifier)
+Outputs rows as CpG sites (first row Ages) and columns as samples (last column CpG site identifiers)
 
 ```{r}
-formatDataset <- function(dataset_name) {
-  # Read beta matrix
-  beta <- read.csv(paste0(beta_path, dataset_name, "_beta.csv"))
-  # Set row names as CpG site identifiers
-  rownames(beta) <- beta[, 1]
-  beta <- beta[, -1]
-  # Read metadata
-  metadata <- read.csv(paste0(metadata_path, dataset_name, "_metadata_cleaned.csv"))
-  # Cut metadata to sample ID and age
-  metadata <- metadata[, c(1, 2)]
-  t_metadata <- as.data.frame(t(metadata))
-  colnames(t_metadata) <- t_metadata[1,]
-  t_metadata <- t_metadata[-1, ]
-  if (all(colnames(t_metadata)==colnames(beta))) {
-    # Combine beta matrix and metadata
-    combined <- rbind(t_metadata, beta)
-  }
-  else {
-    print("Error")
-  }
-  #Set CpG identifiers to last column "cpg" (for data.table support)
-  combined$cpg <- rownames(combined)
-  return(combined)
-}
-# Run code
-datasets <- c("") #list of datasets to be formatted
-
-#for (dataset in datasets) {
-#  temp <- formatDataset(dataset)
-#  write.csv(temp, paste0(combined_path, dataset, "_df.csv"), row.names=FALSE)
-#  rm(temp)
-#  gc()
-#  print(paste0("DONE WITH: ", dataset))
-#}
-```
-
-Find sites present in 11/14 datasets
-321,565 sites left after filtering
-
-```{r}
-overlappingSites <- function(beta_path, datasets) {
-  all_sites <- character()
-  #total_samples <- 0
+formatDatasets <- function() {
+  # Read file paths, assume listed in the same order (alphabetically)
+  metadata_files <- list.files(path="/Users/kchen/OneDrive/Documents/methylation/metadata18")
+  beta_files <- list.files(path="/Users/kchen/OneDrive/Documents/methylation/betas18") 
   
-  #LOop through list of datasets to be examined
-  for (element in datasets) {
-    filepath <- paste0(beta_path, element, "_beta.csv")
-    #sample_names <- fread(filepath, nrows = 1, header = FALSE)[[1]]
-    site_names <- fread(filepath, select = 1, skip = 1)[[1]]
-    #total_samples <- total_samples + length(sample_names)
-    #all sites
-    all_sites <- c(all_sites, site_names)
+  for (i in 1:length(metadata_files)) {
+    if (i==2 | i ==3) {
+    # Harmonize format (.csv & .xlsx)
+    met_ext <- file_ext(metadata_files[i])
+    beta_ext <- file_ext(beta_files[i])
     
-    print(paste("Processing: ", element))
+    if (met_ext=="csv") {
+      met <- read.csv(paste0(metadata_path, metadata_files[i]))
+      # Extract dataset name
+      dataset_name <- gsub("_metadata_cleaned.csv", "", metadata_files[i])
+    } else {
+      met <- read_excel(paste0(metadata_path, metadata_files[i]))
+      # Extract dataset name
+      dataset_name <- gsub("_metadata_cleaned.xlsx", "", metadata_files[i])
+    }
+    if (beta_ext=="csv") {
+      beta <- fread(paste0(beta_path, beta_files[i]))
+    } else {
+      # Needs to read multiple sheets then combine
+      file_path <- paste0(beta_path, beta_files[i])
+      sheet_names <- excel_sheets(file_path)
+      beta <- lapply(sheet_names, function(sheet) {
+        as.data.table(read_excel(file_path, sheet = sheet))
+      }) %>% rbindlist()
+    }
+    
+    # Convert to dataframe
+    met <- as.data.frame(met)
+    beta <- as.data.frame(beta)
+    
+    # Set rownames as CpG site identifiers
+    rownames(beta) <- beta[, 1]
+    beta <- beta[, -1]
+    
+    # Extract only GSM IDs & age
+    met <- met[, c("sample_id", "age")]
+    # Transpose
+    met <- as.data.frame(t(met))
+    # Extract column names
+    ids <- met[1, ]
+    met <- met[-1, ]
+    
+    # Convert ages to numeric
+    met <- as.numeric(met)
+    met <- as.data.frame(t(met))
+    colnames(met) <- ids
+    
+    # Combine
+    df <- bind_rows(met, beta)
+    
+    # Write to file
+    fwrite(df, paste0(combined_path, dataset_name, "_df.csv"), row.names=TRUE)
+    
+    # Logging
+    print(paste0("Done writing: ", dataset_name))
+    
+    # Cleanup
+    if (i%%3==0) {
+      gc()
+    }
+  }
+  }
+}
+
+# Run
+formatDatasets()
+```
+
+Pre-filter of sites to investigate
+
+```{r}
+overlappingSites <- function(cutoff) {
+  # Initialize path
+  file_list <- list.files(path=combined_path)
+  # Initialize output list
+  all_sites <- character()
+  
+  for (i in 1:length(file_list)) {
+    # Read files
+    temp <- fread(paste0(combined_path, file_list[i]))
+    temp <- as.data.frame(temp)
+    rownames(temp) <- temp[, 1]
+    temp <- temp[, -1]
+    
+    # Filter out rows with complete NA values
+    temp <- temp[rowSums(is.na(temp)) < ncol(temp), ]
+    
+    # Extract sites list, excluding ages
+    sites <- rownames(temp[-1, ])
+    
+    # Add to results vector
+    all_sites <- c(all_sites, sites)
+    
+    # Logging
+    print(paste("Processing: ", file_list[i]))
   }
   
-  #create table of all sites and their frequency across datasets
+  # Create table of site frequency across datasets
   site_counts <- table(all_sites)
-  cutoff_number <- 11
-  overlap <- names(site_counts)[site_counts >= cutoff_number]
   
-  output <- data.frame(cpg = overlap, stringsAsFactors=FALSE)
-  return(output)
+  return(site_counts)
+  
+  # Extract sites present in > #cutoff datasets
+  #overlap <- names(site_counts)[site_counts >= cutoff]
+  
+  #output <- data.frame(cpg = overlap, stringsAsFactors=FALSE)
+  #return(output)
 }
 
-# Run code
-datasets <- c("GSE50660", "GSE90124", "GSE40279", "GSE67705", "GSE61256", "GSE73103", "GSE124366",
-              "GSE114134", "GSE89253", "GSE53740", "GSE85568", "GSE106648", "GSE51057", "GSE124076")
-overlaps <- overlappingSites(beta_path, datasets)
-print(length(overlaps$cpg))
+# Run
+site_counts <- overlappingSites(16) # cutoff doesn't matter for this iteration
+#saveRDS(site_counts, "7_21_site_counts.csv")
+#site_counts <- readRDS("7_21_site_counts.csv")
+site_counts <- as.data.frame(site_counts)
+clock_sites <- read.csv("7_3_overlap.csv")[, 2]
+# Subset to clock CpGs
+subset_site_counts <- site_counts[site_counts[, 1] %in% clock_sites, ]
 
-#321565 sites in at least 11 out of 14 training datasets
+thresholds <- seq(22, 1, by = -1)
 
-#save to a file for future analysis
-#write.csv(overlaps, "6_20_cpgfilter1.csv")
+# visualize using bar chart the number of sites present in at least 22 datasets, 21 datasets, 20 datasets
+to_plot <- sapply(thresholds, function(t) sum(site_counts[, 2]>=t))
+to_plot <- data.frame(`CpG Count` = to_plot, Threshold = thresholds)
+
+#485577 sites total in 450K array
+
+# Plot
+ggbarplot(to_plot, x="Threshold", y="CpG.Count", fill="#808080", 
+          title="All CpGs present across datasets")
+#ggsave("figure2a.png", plot=last_plot(), dpi=300)
+
+all_cutoff <- 17
+temp_sites <- site_counts[site_counts[, 2]>=all_cutoff, 1]
+temp_sites <- as.character(temp_sites)
+#saveRDS(temp_sites, "7_23_all_sites.rds")
+
+to_plot2 <- sapply(thresholds, function(t) sum(subset_site_counts[, 2] >= t))
+to_plot2 <- data.frame(`CpG Count` = to_plot2, Threshold = thresholds)
+
+#1868 sites total in clocks
+
+# Plot
+ggbarplot(to_plot2, x="Threshold", y="CpG.Count", fill="#808080",
+          title="Clock CpGs present across datasets")
+#ggsave("figure2b.png", plot=last_plot(), dpi=300)
+
+
+clock_cutoff <- 17
+temp_sites2 <- subset_site_counts[subset_site_counts[, 2]>=clock_cutoff, 1]
+temp_sites2 <- as.character(temp_sites2)
+#saveRDS(temp_sites2, "7_23_clock_sites.rds")
+
+# for now just using full list
+#saveRDS(clock_sites, "7_21_clock_sites.rds")
+
+# All sites
+all_sites <- rownames(site_counts)
+#saveRDS(all_sites, "7_21_complete_sites.rds")
+
+# Logging
+print("1868 clock sites extracted from clocks in total")
 ```
 
-Initialize for further analysis
+Split datasets into chunks of `sites_per_list` sites x N samples (RAM constraints)
 
 ```{r}
-#START PRE INITIALIZING CHUNK
-# all datasets
-training_datasets <- c("GSE50660", "GSE90124", "GSE40279", "GSE67705", "GSE61256", "GSE73103", "GSE124366")
-testing_datasets <- c("GSE114134", "GSE89253", "GSE53740", "GSE85568", "GSE106648", "GSE51057", "GSE124076")
-# Define input path
-combined_path <- "/Users/kchen/OneDrive/Documents/methylation/combined18/"
-# Read desired CpG sites from overlappingSites()
-initial_cpg_list <- read.csv("6_20_cpgfilter1.csv")[, 2] #could change in future based on cpg used filtering process
-# Extract number of sites
-NUMCPGSITE <- length(initial_cpg_list)
-# Define chunk length
-sites_per_list <- 30000
-# Define group number
-num_groups <- ceiling(NUMCPGSITE/sites_per_list)
-#11 partitions as of 6/15
-# Split CpG sites into chunks
-split_lists <- vector("list", num_groups)
-for (i in 1:num_groups) {
-  start_index <- (i-1)*sites_per_list + 1
-  end_index <- min(i*sites_per_list, NUMCPGSITE)
-  split_lists[[i]] <- initial_cpg_list[start_index:end_index]
-}
-
-training_subset_folder <- "/Users/kchen/OneDrive/Documents/methylation/training_split/"
-testing_subset_folder <- "/Users/kchen/OneDrive/Documents/methylation/testing_split/"
-#END PRE INITIALIZING CHUNK
-```
-
-Split datasets into chunks of 30,000 sites x N samples
-11 chunks in all
-
-```{r}
-standardizeDataset <- function(df_name, desired_cpgs) {
-  df <- readr::read_csv(paste0(combined_path, df_name, "_df.csv"))
+makeChunks <- function(sites_per_list, output_folder) {
+  # List files
+  file_list <- list.files(path=combined_path)
   
-  # Extract ages
-  ages <- df[1, ]
-  df <- df[-1, ]
-  template <- data.table(cpg=desired_cpgs)
-  # Reorder and filter by reference CpG sites
-  df <- merge(template, df, by.x="cpg", by.y="cpg", all.x=TRUE, sort=FALSE)
-  # Reattach ages
-  df <- rbind(ages, df)
-  
-  return(df)
-}
+  # Create split lists
+  # Read desired site list
+  initial_cpg_list <- readRDS("7_21_complete_sites.rds")
 
-makeChunks <- function(datasets, split_site_list, output_folder) {
-  count <- 1
-  for (site_list in split_site_list) {
-    temp <- data.frame()
-    for (dataset in datasets) {
-      df <- standardizeDataset(dataset, site_list)
+  NUMCPGSITE <- length(initial_cpg_list)
+  num_groups <- ceiling(NUMCPGSITE/sites_per_list)
+  
+  # Create splits
+  split_lists <- vector("list", num_groups)
+  for (i in 1:num_groups) {
+    start_index <- (i-1)*sites_per_list + 1
+    end_index <- min(i*sites_per_list, NUMCPGSITE)
+    split_lists[[i]] <- initial_cpg_list[start_index:end_index]
+  }
+  
+  # Loop  through all CpG site splits 
+  for (i in 1:length(split_lists)) {
+    # Initialize temporary dataframe
+    template_sites <- c("age", split_lists[[i]])
+    temp <- data.frame(cpg=template_sites)
+    # Loop through all datasets
+    for (j in 1:length(file_list)) {
+      df <- fread(paste0(combined_path, file_list[j])) 
+      df <- as.data.table(df)
+      # Set identifier as age
+      df[1, 1] <- "age"
+      
+      # Create a template to map to consistent sites
+      template <- data.table(cpg=template_sites)
+      
+      # Merge actual data to template
+      df2 <- merge(template, df, by.x="cpg", by.y="V1", all.x=TRUE, sort=FALSE)
+
+      # Set rownames as CpG sites
+      df2 <- as.data.frame(df2)
+      rownames(df2) <- df2[, 1]
+      df2 <- df2[, -1]
+      
+      # Append to temporary dataframe
       if (ncol(temp)==0) {
-        temp <- df
-      }
-      else {
-        temp <- cbind(temp, df)
+        temp <- df2
+      } else {
+        temp <- bind_cols(temp, df2)
       }
     }
-    write.csv(temp, file=paste0(output_folder, "partition_", count, ".csv"), row.names=TRUE)
-    count <- count + 1
+    # Save split in specified folder
+    fwrite(temp, paste0(output_folder, "/split_", i, ".csv"), row.names=TRUE)
+    
+    # Logging
+    print(paste0("Written split ", i))
+    gc()
   }
 }
 
-# Run code
-#makeChunks(training_datasets, split_lists, training_subset_folder)
-#makeChunks(testing_datasets, split_lists, testing_subset_folder)
+# Run
+makeChunks(50000, "/Users/kchen/OneDrive/Documents/methylation/combined_split_complete")
 ```
 
-Filter based on sliding window method (must have correlation > 0.4 and absolute beta change > 0.2 to be considered)
-167,387 sites left after filtering
+Create empty matrix helper function
+
+```{r}
+# Helper function
+createEmptyMatrix <- function(NUMCPGSITE, cpg_list, start_age, end_age) {
+  B <- matrix(NA, nrow=NUMCPGSITE, ncol = end_age - start_age + 1)
+  age_range <- start_age:end_age
+  rownames(B) <- cpg_list
+  column_names <- character(end_age - start_age + 1)
+  for (i in 1:(end_age - start_age + 1)) {
+    column_names[i] <- paste0("age_", i-1+start_age)
+  }
+  colnames(B) <- column_names
+  return(B)
+}
+```
+
+generateMatrix function
+
+```{r}
+# Generate overall matrix for downstream analysis
+# - gender_state: 1 = no stratification, 2 = male, 3 = female
+# - clock_state: TRUE: use clock CpGs, FALSE: use All CpGs
+# - avg_state: TRUE: generate matrix of average betas, FALSE: generate matrix of standard deviations
+generateMatrix <- function(gender_state=1, output_file_path1, output_file_path2) {
+  folder <- "/Users/kchen/OneDrive/Documents/methylation/combined_split_complete"
+  # Initialize input path
+  list_files <- list.files(path=folder)
+  # Extract number of splits
+  num_files <- length(list_files)
+  
+  # Read desired CpGs
+ 
+  initial_cpg_list <- readRDS("7_21_complete_sites.rds")
+
+  NUMCPGSITE <- length(initial_cpg_list)
+  
+  # Create empty matrices
+  B <- createEmptyMatrix(NUMCPGSITE, initial_cpg_list, 0, 100)
+  S <- createEmptyMatrix(NUMCPGSITE, initial_cpg_list, 0, 100)
+
+  # Loop through all splits
+  for (i in 1:num_files) {
+    # Read split from folder
+    temp <- fread(paste0(folder, "/", list_files[i]))
+    # Format:
+    # - First two columns are identical: "V1", "cpg"
+    #  - contain "age" then CpG identifiers
+    # - Column names are GSM IDs
+    # - First Row contains ages
+    
+    # Format split
+    temp <- as.data.frame(temp)
+    # Set rownames
+    rownames(temp) <- temp[, 1]
+    temp <- temp[, -c(1, 2)]
+    # Round non-integer ages
+    temp["age", ] <- round(temp["age", ])
+  
+    # Filter for desired samples (gender-stratified)
+    if (gender_state==1) {
+      temp <- temp[, colnames(temp) %in% all_samples]
+    } else if (gender_state==2) {
+      temp <- temp[, colnames(temp) %in% male_samples]
+    } else if (gender_state==3) {
+      temp <- temp[, colnames(temp) %in% female_samples]
+    } else {
+      print("Error")
+      break
+    }
+    
+    # Save identifiers to examine
+    ident <- rownames(temp[-1, ])
+    #NUMCPGSITE3 <- length(ident)
+    
+    for (j in 0:100) {
+      # Select samples at age j
+      des_cols <- which(temp["age", ]==j)
+      
+      # Check if there are samples at age j
+      if (length(des_cols) != 0) {
+        temp2 <- temp[, des_cols]
+        
+        if (is.null(nrow(temp2)) || nrow(temp2) < 2) {
+          print(paste0("Skipping age ", j, " in Split ", i, " due to insufficient data"))
+          next
+        }
+        
+        # Remove Age Row
+        temp2 <- temp2[-1, ]
+        
+        # If clock_state==TRUE, only select clock sites
+        # Could be 0 rows
+        #if (clock_state) {
+        #  des_rows <- which(rownames(temp2) %in% initial_clock_list)
+        #  temp2 <- temp2[des_rows, ]
+        #  # Reinitialize targeted cpgs
+        #  ident <- rownames(temp2)
+        #}
+        
+        setDT(temp2)
+        
+        # Generate averages and standard deviations at age j for vector of specified CpG sites
+        average_vector <- temp2[, .(final = rowMeans(.SD, na.rm=TRUE)), by=.I]
+        average_vector <- as.data.frame(average_vector)
+        sd_vector <- temp2[, .(final = apply(.SD, 1, sd, na.rm=TRUE)), by=.I]
+        sd_vector <- as.data.frame(sd_vector)
+        
+        # Assign back to matrices
+        if (ncol(average_vector) > 0 & nrow(average_vector) > 0) {
+          B[ident, paste0("age_", j)] <- average_vector$final
+          S[ident, paste0("age_", j)] <- sd_vector$final
+        }
+            
+        # Logging
+        print(paste0("Processing age ", j, ", Split ", i))
+      } else {
+        print(paste0("No samples at age ", j))
+      }
+    }
+    gc()
+  }
+  print("Writing files now")
+  
+  # Convert to dataframes to preserve rownames
+  B <- as.data.frame(B)
+  S <- as.data.frame(S)
+  fwrite(B, output_file_path1, row.names=TRUE)
+  fwrite(S, output_file_path2, row.names=TRUE)
+}
+
+generateMatrix(gender_state=1, "7_21_all_matrix_avg.csv", "7_21_all_matrix_sd.csv")
+generateMatrix(gender_state=2, "7_22_male_matrix_avg.csv", "7_22_male_matrix_sd.csv")
+generateMatrix(gender_state=3, "7_22_female_matrix_avg.csv", "7_22_female_matrix_sd.csv")
+#generateMatrix(gender_state=1, clock_state = TRUE, "7_19_clock_matrix_avg.csv", "7_19_clock_matrix_sd.csv")
+```
+
+Check what percentage is NA
+
+```{r}
+B <- fread("7_21_all_matrix_avg.csv")
+B <- as.data.frame(B)
+rownames(B) <- B[, 1]
+B <- B[, -1]
+
+sub_B <- B[rownames(B) %in% temp_sites, ]
+print(paste0("Percent NA: ", sum(is.na(sub_B)) / (dim(sub_B)[1] * dim(sub_B)[2]) * 100))
+
+clock_B <- B[rownames(B) %in% temp_sites2, ]
+print(paste0("Percent NA Clock: ", sum(is.na(clock_B)) / (dim(clock_B)[1] * dim(clock_B)[2]) * 100))
+
+B <- fread("7_22_male_matrix_avg.csv")
+B <- as.data.frame(B)
+rownames(B) <- B[, 1]
+B <- B[, -1]
+
+sub_B <- B[rownames(B) %in% temp_sites, ]
+print(paste0("Percent NA B Male: ", sum(is.na(sub_B)) / (dim(sub_B)[1] * dim(sub_B)[2]) * 100))
+
+clock_B <- B[rownames(B) %in% temp_sites2, ]
+print(paste0("Percent NA B Male Clock: ", sum(is.na(clock_B)) / (dim(clock_B)[1] * dim(clock_B)[2]) * 100))
+
+B <- fread("7_22_female_matrix_avg.csv")
+B <- as.data.frame(B)
+rownames(B) <- B[, 1]
+B <- B[, -1]
+
+sub_B <- B[rownames(B) %in% temp_sites, ]
+print(paste0("Percent NA B Female: ", sum(is.na(sub_B)) / (dim(sub_B)[1] * dim(sub_B)[2]) * 100))
+
+clock_B <- B[rownames(B) %in% temp_sites2, ]
+print(paste0("Percent NA B Female Clock: ", sum(is.na(clock_B)) / (dim(clock_B)[1] * dim(clock_B)[2]) * 100))
+```
+
+Generate filter results matrix (all CpGs)
+
+```{r}
+# From generated CpG site by Age matrices for average beta and sd beta, generate results dataframe relevant to filter
+extractResults <- function(avg_matrix_path, sd_matrix_path) {
+  # Read matrices
+  B <- fread(avg_matrix_path)
+  S <- fread(sd_matrix_path)
+  
+  # Format matrices
+  B <- as.data.frame(B)
+  rownames(B) <- B[, 1]
+  B <- B[, -1]
+  S <- as.data.frame(S)
+  rownames(S) <- S[, 1]
+  S <- S[, -1]
+  
+  # Initialize results output
+  results_full <- data.frame()
+  
+  for (start_age in seq(0, 60, by=5)) {
+    end_age <- start_age + 20
+    
+    # Logging
+    print(paste0("Processing start age: ", start_age))
+    
+    # Extract relevant columns
+    des_cols <- which(as.numeric(gsub("age_", "", colnames(B))) >= start_age & 
+                        as.numeric(gsub("age_", "", colnames(B))) <= end_age)
+    
+    # Subset initial matrices
+    sub_B <- B[, des_cols]
+    sub_S <- S[, des_cols]
+    
+    # Calculate correlations
+    corr_results <- apply(sub_B, 1, function(x) cor(x, start_age:end_age))
+
+    # Calculate absolute beta change
+    abs_change_results <- apply(sub_B, 1, function(x) max(x) - min(x))
+    
+    # Calculate num variance
+    # Set threshold
+    adj_avg <- 0.5 * sqrt(sub_B * (1 - sub_B))
+
+    # Change to matrix    
+    sub_S_matrix <- as.matrix(sub_S)
+
+    # Count how many age points are above threshold
+    is_above_threshold <- !is.na(adj_avg) & !is.na(sub_S_matrix) & (sub_S_matrix > adj_avg)
+    sd_results <- rowSums(is_above_threshold, na.rm = TRUE)
+    sd_results <- as.data.frame(sd_results)
+
+    # Combine results
+    temp_results <- cbind(corr_results, abs_change_results, sd_results)
+    
+    # Assign appropriate column names
+    name_cols <- c(paste0(start_age, "-", end_age, "-corr_res"),
+                   paste0(start_age, "-", end_age, "-abs_res"),
+                   paste0(start_age, "-", end_age, "-sd_res0.5"))
+    colnames(temp_results) <- name_cols
+    rownames(temp_results) <- rownames(sub_B)
+    
+    # Add to main results
+    if (ncol(results_full)==0) {
+      results_full <- temp_results
+    } else {
+      results_full <- cbind(results_full, temp_results)
+    }
+  }
+  return(results_full)
+}
+results1 <- extractResults("7_21_all_matrix_avg.csv", "7_21_all_matrix_sd.csv")
+#saveRDS(results1, "results1.rds")
+results2 <- extractResults("7_22_male_matrix_avg.csv", "7_22_male_matrix_sd.csv")
+#saveRDS(results2, "results2.rds")
+results3 <- extractResults("7_22_female_matrix_avg.csv", "7_22_female_matrix_sd.csv")
+#saveRDS(results3, "results3.rds")
+```
+
+Visualize filter results
+
+```{r}
+visualizeFilterResults <- function(results_file) {
+  results1 <- readRDS(results_file)
+  
+  # Subset to CpG sites present in 17/22 datasets
+  all_sites <- readRDS("7_23_all_sites.rds")
+  results1 <- results1[rownames(results1) %in% all_sites, ]
+  
+  
+  # Extract and stratify results
+  cor_res <- results1[, seq(1, ncol(results1), by=3)]
+  abs_res <- results1[, seq(2, ncol(results1), by=3)]
+  sd_res <- results1[, seq(3, ncol(results1), by=3)]
+  
+  for (i in 1:ncol(cor_res)) {
+    plot_df1 <- cbind(cor_res[i], abs_res[i])
+    plot_df2 <- sd_res[i]
+    
+    split_name <- gsub("-corr_res", "", colnames(plot_df1)[1])
+    
+    colnames(plot_df1) <- c("V1", "V2")
+    colnames(plot_df2) <- c("V1")
+    
+    p <- ggscatter(plot_df1, x="V1", y="V2", size=1, xlab="Correlation Coefficient", ylab="Absolute Change",   title=split_name)
+    plot(p)
+    
+    counts <- plot_df2 %>%
+      group_by(V1) %>%
+      summarize(Count=n())
+    
+    # Cut out first row with 0 being over threshold
+    counts <- counts[-1, ]
+    
+    q <- ggbarplot(counts, x="V1", y="Count", xlab="# Age points over SD Threshold", 
+                   ylab="Count (not accumulative)", title=split_name)
+    plot(q)
+  }
+}
+
+visualizeFilterResults("results1.rds")
+visualizeFilterResults("results2.rds")
+visualizeFilterResults("results3.rds")
+```
+
+Apply filter to results dataframe
+```{r}
+filter_criteria <- function(row) {
+  for (i in seq(1, ncol(results1), by = 3)) {
+    if (i + 2 <= ncol(results1)) {
+      corr_res <- row[i]
+      abs_res <- row[i + 1]
+      sd_res <- row[i + 2]
+      
+      # Check if all criteria are met
+      if (!is.na(corr_res) && !is.na(abs_res) && !is.na(sd_res) &&
+          abs(corr_res) > 0.5 && abs_res > 0.25 && sd_res < 2) {
+        return(TRUE)
+      }
+    }
+  }
+  return(FALSE)
+}
+
+print_significant_counts <- function(results, gender_state = 1) {
+  significant_counts <- data.frame(Age_Window = character(), Count = integer(), Gender = character(), stringsAsFactors = FALSE)
+  
+  for (i in seq(1, ncol(results), by = 3)) {
+    if (i + 2 <= ncol(results)) {
+      filtered_in_window <- apply(results[, c(i, i + 1, i + 2)], 1, function(row) {
+        corr_res <- row[1]
+        abs_res <- row[2]
+        sd_res <- row[3]
+        !is.na(corr_res) && !is.na(abs_res) && !is.na(sd_res) &&
+        abs(corr_res) > 0.5 && abs_res > 0.25 && sd_res < 2
+      })
+      window_name <- gsub("-corr_res", "", colnames(results)[i])
+      significant_counts <- rbind(significant_counts, data.frame(Age_Window = window_name, Count = sum(filtered_in_window), Gender = ifelse(gender_state == 1, "All", ifelse(gender_state == 2, "Male", "Female"))))
+    }
+  }
+  
+  return(significant_counts)
+}
+
+
+results1 <- readRDS("results1.rds")
+all_sites <- readRDS("7_23_all_sites.rds")
+results1 <- results1[rownames(results1) %in% all_sites, ]
+results2 <- readRDS("results2.rds")
+results2 <- results2[rownames(results2) %in% all_sites, ]
+results3 <- readRDS("results3.rds")
+results3 <- results3[rownames(results3) %in% all_sites, ]
+
+significant_counts1 <- print_significant_counts(results1, 1)
+significant_counts2 <- print_significant_counts(results2, 2)
+significant_counts3 <- print_significant_counts(results3, 3)
+
+filtered_results1 <- results1[apply(results1, 1, filter_criteria), ]
+filtered_results2 <- results2[apply(results2, 1, filter_criteria), ]
+filtered_results3 <- results3[apply(results3, 1, filter_criteria), ]
+
+print(paste0("All significant sites: ", dim(filtered_results1)[1]))
+print(paste0("Male significant sites: ", dim(filtered_results2)[1]))
+print(paste0("Female significant sites: ", dim(filtered_results3)[1]))
+
+filter_sites_all <- rownames(filtered_results1)
+filter_sites_male <- rownames(filtered_results2)
+filter_sites_female <- rownames(filtered_results3)
+
+saveRDS(filter_sites_all, "filter_sites_all.rds")
+saveRDS(filter_sites_male, "filter_sites_male.rds")
+saveRDS(filter_sites_female, "filter_sites_female.rds")
+
+# Print results
+for (i in 1:nrow(significant_counts1)) {
+  print(paste0("All, Age window: ", significant_counts1[i, 1], " # CpGs: ", significant_counts1[i, 2]))
+}
+
+for (i in 1:nrow(significant_counts2)) {
+  print(paste0("Male, Age window: ", significant_counts2[i, 1], " # CpGs: ", significant_counts2[i, 2]))
+}
+
+for (i in 1:nrow(significant_counts3)) {
+  print(paste0("Female, Age window: ", significant_counts3[i, 1], " # CpGs: ", significant_counts3[i, 2]))
+}
+```
+
+Make Clock CpG annotation matrix
+
+```{r}
+clock_sites_investigated <- readRDS("7_23_clock_sites.rds")
+clocks <- c("McEwen", "Wu", "Hannum", "Horvath", "Levine", "Belsky", "Teschendorff", "Shireby", "Lu")
+clock_annotations <- data.frame(matrix(ncol = length(clocks), nrow = length(clock_sites_investigated)))
+names(clock_annotations) <- clocks
+rownames(clock_annotations) <- rownames(clock_sites_investigated)
+
+clock_annotations$McEwen[clock_sites_investigated %in% McEwen_CpGs] <- 1
+clock_annotations$Wu[clock_sites_investigated %in% Wu_CpGs] <- 1
+clock_annotations$Hannum[clock_sites_investigated %in% Hannum_CpGs] <- 1
+clock_annotations$Horvath[clock_sites_investigated %in% Horvath_CpGs] <- 1
+clock_annotations$Levine[clock_sites_investigated %in% Levine_CpGs] <- 1
+clock_annotations$Belsky[clock_sites_investigated %in% Belsky_CpGs] <- 1
+clock_annotations$Teschendorff[clock_sites_investigated %in% Teschendorff_CpGs] <- 1
+clock_annotations$Shireby[clock_sites_investigated %in% Shireby_CpGs] <- 1
+clock_annotations$Lu[clock_sites_investigated %in% Lu2_CpGs] <- 1
+
+clock_annotations[is.na(clock_annotations)] <- 0
+
+ha = rowAnnotation(df = clock_annotations, col = list(
+    McEwen = c("0" = "gray", "1" = "purple"),
+    Wu = c("0" = "gray", "1" = "orange"),
+    Hannum = c("0" = "gray", "1" = "red"),
+    Horvath = c("0" = "gray", "1" = "blue"),
+    Levine = c("0" = "gray", "1" = "green"),
+    Belsky = c("0" = "gray", "1" = "yellow"),
+    Teschendorff = c("0" = "gray", "1" = "pink"),
+    Shireby = c("0" = "gray", "1" = "magenta"),
+    Lu = c("0" = "gray", "1" = "maroon")),
+    simple_anno_size = unit(3, "mm"),
+    show_legend=c(FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE)
+)
+```
+
+Function to linearly interpolate sparse missing values in B
+
+```{r}
+# Linearly interpolate missing values
+interpolate_na <- function(row) {
+  na_indices <- which(is.na(row))
+  non_na_indices <- which(!is.na(row))
+  
+  if (length(na_indices)==0) {
+    return(row)
+  }
+  
+  interpolated_values <- approx(non_na_indices, row[non_na_indices], xout=na_indices, method="linear", rule=2)$y
+  row[na_indices] <- interpolated_values
+  
+  return(row)
+}
+```
+
+UpSet plot for overlaps in selected CpGs
+
+```{r}
+cpg_filter1 <- readRDS("filter_sites_all.rds")
+cpg_filter2 <- readRDS("filter_sites_male.rds")
+cpg_filter3 <- readRDS("filter_sites_female.rds")
+
+filter_list <- list(
+  All_CpGs = cpg_filter1,
+  Male_CpGs = cpg_filter2,
+  Female_CpGs = cpg_filter2
+)
+
+m1 <- make_comb_mat(filter_list, mode="intersect")
+UpSet(m1)
+dev.copy(png, "figure4a.png", width=900)
+dev.off()
+```
+
+Main pipeline
+
+```{r}
+ht_opt$fast_hclust = TRUE
+# Ensure reproducibility of row_km
+set.seed(123)
+mainPipeline <- function(num_clusters, save=FALSE, clock=FALSE, gender_state=1) {
+  # Read matrix
+  if (gender_state==1) {
+    B <- fread("7_21_all_matrix_avg.csv")
+    cpg_filter <- readRDS("filter_sites_all.rds")
+  } else if (gender_state==2) {
+    B <- fread("7_22_male_matrix_avg.csv")
+    cpg_filter <- readRDS("filter_sites_male.rds")
+  } else {
+    B <- fread("7_22_female_matrix_avg.csv")
+    cpg_filter <- readRDS("filter_sites_female.rds")
+  }
+
+  if (clock==TRUE) {
+    cpg_filter <- readRDS("7_23_clock_sites.rds")
+  }
+  
+  B <- as.data.frame(B)
+  rownames(B) <- B[, 1]
+  B <- B[, -1]
+  
+  # Filter
+  B <- B[rownames(B) %in% cpg_filter,]
+  
+  # Scale
+  B <- t(scale(t(B)))
+  B <- as.matrix(B)
+  colnames(B) <- gsub("age_", "", colnames(B))
+  rownames(B) <- cpg_filter
+  
+  # Remove last NA ages
+  B <- B[, colSums(is.na(B)) < nrow(B)]
+  
+  # Fill in sparse NA values using linear interpolation
+  B <- t(apply(B, 1, interpolate_na))
+  
+  if (clock==TRUE) {
+    ht <- Heatmap(B, name = "Scaled Beta Values", 
+        row_km = num_clusters,
+        row_km_repeats = 10, # different start points for kmeans clustering
+        show_row_names=FALSE,
+        cluster_columns=FALSE,
+        row_title = "Clock CpGs", 
+        column_title = "Ages",
+        column_names_gp = gpar(fontsize = 4, fontface="plain", fontfamily="serif"),
+        column_names_rot = 0,
+        right_annotation = ha)
+  } else {
+    ht <- Heatmap(B, name = "Scaled Beta Values", 
+        row_km = num_clusters,
+        row_km_repeats = 10, # different start points for kmeans clustering
+        show_row_names=FALSE,
+        cluster_columns=FALSE,
+        row_title = "Selected CpGs", 
+        column_title = "Ages",
+        column_names_gp = gpar(fontsize = 4, fontface="plain", fontfamily="serif"),
+        column_names_rot = 0)
+  }
+  
+  if (save==TRUE) {
+     png(paste0(gender_state, clock, num_clusters, "heatmap.png"))
+  }
+  ht <- draw(ht)
+  if (save==TRUE) {
+    dev.off()
+  }
+
+  cluster_assignments <- row_order(ht)
+  cluster_vector <- unlist(lapply(1:length(cluster_assignments), function(i) {
+    rep(i, length(cluster_assignments[[i]]))
+  }))
+  # Assign cluster indices to rows
+  B_with_clusters <- cbind(B, Cluster=cluster_vector[order(unlist(cluster_assignments))])
+  B_with_clusters <- as.data.frame(B_with_clusters)
+  
+  for (j in 1:num_clusters) {
+    df <- B_with_clusters[which(B_with_clusters$Cluster==j),]
+    long_df <- df %>%
+      rownames_to_column(var="Sample") %>%
+      pivot_longer(cols=-c("Sample"), names_to="Age", values_to="Beta") %>%
+      mutate(Age=as.numeric(Age))
+    long_df <- na.omit(long_df)
+
+    fit <- lm(Beta ~ bs(Age, df=5), data=long_df)
+    long_df$Fitted <- predict(fit)
+    
+    a <- ggscatter(long_df, x="Age", y="Beta", size=1, title=paste("Avg Betas for CpGs in Cluster", j),
+              xlab = "Age", ylab = "Scaled Beta Values", color="lightgray") +
+      geom_line(aes(y=Fitted), color="blue") +
+      ylim(-5, 5)
+    print(a)
+    if (save==TRUE) {
+      ggsave(filename=paste0(gender_state, clock, num_clusters, "Cluster_", j, ".png"), plot=a)
+    }
+  }
+  return(B_with_clusters)
+}
+```
+
+```{r}
+all_B1_1 <- mainPipeline(4, save=TRUE, clock=TRUE, gender_state=1)
+```
+
+
+```{r}
+all_B1_2 <- mainPipeline(5, save=TRUE, clock=TRUE, gender_state=1)
+```
+
+```{r}
+all_B1_3 <- mainPipeline(6, save=TRUE, clock=TRUE, gender_state=1)
+```
+
+```{r}
+all_B2_1 <- mainPipeline(4, save=TRUE, clock=FALSE, gender_state=1)
+```
+
+```{r}
+all_B2_1 <- mainPipeline(5, save=FALSE, clock=FALSE, gender_state=1)
+```
+
+```{r}
+all_B2_1 <- mainPipeline(6, save=FALSE, clock=FALSE, gender_state=1)
+```
+
+```{r}
+all_B3_1 <- mainPipeline(4, save=TRUE, clock=FALSE, gender_state=2)
+```
+
+```{r}
+all_B4_1 <- mainPipeline(4, save=TRUE, clock=FALSE, gender_state=3)
+```
+
+
+# Below is not run yet // need to refactor
+
+# Initialize Annotation Matrix // need to refactor
+```{r}
+
+```
+
+
+
+
+# EVERYTHING BELOW IS OLD CODE
+
+
+
+
+
+
+
+
+
+** check which age windows to investigate after generating the histogram
 
 ```{r}
 filterCorrelationsAndChange <- function(num_splits, training=TRUE) {
-  subset_folder <- testing_subset_folder
-  if (training) {
-    subset_folder <- training_subset_folder
-  }
+  subset_folder <- "/Users/kchen/OneDrive/Documents/methylation/combined_split3/"
+  #subset_folder <- testing_subset_folder
+  #if (training) {
+  #  subset_folder <- training_subset_folder
+  #}
   #initialize output list 
   results_by_window <- list()
   for (start_age in seq(5, 70, by=5)) {
@@ -206,13 +1131,13 @@ filterCorrelationsAndChange <- function(num_splits, training=TRUE) {
   for (j in 1:num_splits) {
     temp <- readr::read_csv(paste0(subset_folder, "partition_" , j, ".csv")) 
     temp <- as.data.frame(temp)
-    if (!training) {
-      rownames(temp) <- temp$cpg...207 #466 for training, 207 for testing
-    }
-    if (training) {
-      rownames(temp) <- temp$cpg...466 #466 for training, 207 for testing
-      
-    }
+    #if (!training) {
+    #  rownames(temp) <- temp$cpg...207 #466 for training, 207 for testing
+    #}
+    #if (training) {
+    #  rownames(temp) <- temp$cpg...466 #466 for training, 207 for testing
+    #}
+    rownames(temp) <- temp$cpg...466
     temp <- temp[, grep("GSM", names(temp), value=TRUE)]
     ages <- as.numeric(temp[1, ])
     betas <- as.matrix(temp[-1, ])
@@ -271,32 +1196,56 @@ all_cpg_sites <- unlist(results_by_window)
 unique_cpg_sites <- unique(all_cpg_sites)
 print(length(unique_cpg_sites))
 
-#down to 167387 sites
+#down to 167387 sitesa
 sorted_unique_cpg_sites <- sort(unique_cpg_sites)
-write.csv(sorted_unique_cpg_sites, "6_20_cpgfilter2.csv")
+write.csv(sorted_unique_cpg_sites, "7_15_cpgfilter2.csv")
+
+#[1] "Start age: 5 End age: 25 Num CpG sites r>0.4 & Abs Change>=0.2: 77370"
+#[1] "Start age: 10 End age: 30 Num CpG sites r>0.4 & Abs Change>=0.2: 8669"
+#[1] "Start age: 15 End age: 35 Num CpG sites r>0.4 & Abs Change>=0.2: 75266"
+#[1] "Start age: 20 End age: 40 Num CpG sites r>0.4 & Abs Change>=0.2: 87682"
+#[1] "Start age: 25 End age: 45 Num CpG sites r>0.4 & Abs Change>=0.2: 6005"
+#[1] "Start age: 30 End age: 50 Num CpG sites r>0.4 & Abs Change>=0.2: 2"
+#[1] "Start age: 35 End age: 55 Num CpG sites r>0.4 & Abs Change>=0.2: 0"
+#[1] "Start age: 40 End age: 60 Num CpG sites r>0.4 & Abs Change>=0.2: 0"
+#[1] "Start age: 45 End age: 65 Num CpG sites r>0.4 & Abs Change>=0.2: 0"
+#[1] "Start age: 50 End age: 70 Num CpG sites r>0.4 & Abs Change>=0.2: 0"
+#[1] "Start age: 55 End age: 75 Num CpG sites r>0.4 & Abs Change>=0.2: 637"
+#[1] "Start age: 60 End age: 80 Num CpG sites r>0.4 & Abs Change>=0.2: 1217"
+#[1] "Start age: 65 End age: 85 Num CpG sites r>0.4 & Abs Change>=0.2: 950"
+#[1] "Start age: 70 End age: 90 Num CpG sites r>0.4 & Abs Change>=0.2: 688"
+#[1] 127642
+
 ```
 
 Filter for sites that have variance > 0.01
-46,233 sites left after filtering
+#46,233 sites left after filtering
+
+#using all datasets
+
+** might not need this one
 
 ```{r}
 varianceFilter <- function(num_splits, folder_with_pre_filter, threshold=0.01, training=TRUE) {
   sites <- read.csv(folder_with_pre_filter)
   sites <- sites$x
-  subset_folder <- testing_subset_folder
-  if (training) {
-    subset_folder <- training_subset_folder
-  }
+  #subset_folder <- testing_subset_folder
+  #if (training) {
+  #  subset_folder <- training_subset_folder
+  #}
+  subset_folder <- "/Users/kchen/OneDrive/Documents/methylation/combined_split3/"
+
   
   all_sites <- list()
   
   for (j in 1:num_splits) {
     temp <- readr::read_csv(paste0(subset_folder, "partition_" , j, ".csv")) 
     temp <- as.data.frame(temp)
-    des_rows <- which(temp$cpg...207 %in% sites)
-    if (training) {
-      des_rows <- which(temp$cpg...466 %in% sites)
-    }
+    #des_rows <- which(temp$cpg...207 %in% sites)
+    #if (training) {
+    #  des_rows <- which(temp$cpg...466 %in% sites)
+    #}
+    des_rows <- which(temp$cpg...466 %in% sites)
     rownames(temp) <- temp$cpg...466 #466 for training, 207 for testing
     temp <- temp[des_rows, ]
     temp <- temp[, grep("GSM", names(temp), value=TRUE)]
@@ -310,9 +1259,9 @@ varianceFilter <- function(num_splits, folder_with_pre_filter, threshold=0.01, t
   return(all_sites)
 }
 
-sites_filtered2 <- varianceFilter(num_groups, "6_20_cpgfilter2.csv", training=TRUE)
+sites_filtered2 <- varianceFilter(num_groups, "7_15_cpgfilter2.csv", training=TRUE)
 print(length(sites_filtered2))
-write.csv(sites_filtered2, "6_20_cpgfilter3.csv")
+write.csv(sites_filtered2, "7_15_cpgfilter3.csv")
 ```
         
 Generate an i x j matrix, where i are CpG sites and j is ages 0-100
@@ -335,10 +1284,12 @@ generateMatrix <- function(file_with_pre_filter, num_splits=num_groups, training
     column_names[i+1] <- paste0("age_", i)
   }
   colnames(B) <- column_names
-  subset_folder <- testing_subset_folder
-  if (training) {
-    subset_folder <- training_subset_folder
-  }
+  subset_folder <- "/Users/kchen/OneDrive/Documents/methylation/combined_split3/"
+
+  #subset_folder <- testing_subset_folder
+  #if (training) {
+  #  subset_folder <- training_subset_folder
+  #}
   
   for (i in 1:num_splits) {
     temp <- readr::read_csv(paste0(subset_folder, "partition_", i, ".csv"))
@@ -346,13 +1297,13 @@ generateMatrix <- function(file_with_pre_filter, num_splits=num_groups, training
     temp <- temp[, -1]
     #filter for sites from correlation function
     #466 for training, 207 for testing
-    if (training) {
-      des_rows <- which(temp$cpg...466 %in% sites)
-    }
-    if (!training) {
-      des_rows <- which(temp$cpg...207 %in% sites)
-      
-    }
+    #if (training) {
+    #  des_rows <- which(temp$cpg...466 %in% sites)
+    #}
+    #if (!training) {
+    #  des_rows <- which(temp$cpg...207 %in% sites)
+    #}
+    des_rows <- which(temp$cpg...466 %in% sites)
     temp <- temp[c(1, des_rows), ] #keep ages in the first row
     # Extract CpG site list
     identifiers <- temp[-1, ncol(temp)]
@@ -381,12 +1332,13 @@ generateMatrix <- function(file_with_pre_filter, num_splits=num_groups, training
         }        
         # DEBUG // print(paste0("Averaging done"))
         aggregated <- as.data.frame(aggregated)
-        if (training) {
-          rownames(aggregated) <- as.character(identifiers$cpg...2441) #2441 for training, 1512 for testing
-        }
-        else {
-          rownames(aggregated) <- as.character(identifiers$cpg...1512) #2441 for training, 1512 for testing
-        }
+        #if (training) {
+        #  rownames(aggregated) <- as.character(identifiers$cpg...2441) #2441 for training, 1512 for testing
+        #}
+        #else {
+        #  rownames(aggregated) <- as.character(identifiers$cpg...1512) #2441 for training, 1512 for testing
+        #}
+        rownames(aggregated) <- as.character(identifiers$cpg...3952)
         # Reassignment to matrix B
         B[rownames(aggregated), paste0("age_", j)] <- aggregated$final
         # DEBUG //print(paste0("Split: ", i, ", Age: ", j, " updated"))
@@ -396,10 +1348,10 @@ generateMatrix <- function(file_with_pre_filter, num_splits=num_groups, training
   return(B)
 }
 
-V <- generateMatrix("6_20_cpgfilter3.csv", num_splits=num_groups, training=TRUE, average=FALSE)
-write.csv(V, "6_20_variance_matrix_v1.csv", row.names=TRUE)
-B <- generateMatrix("6_20_cpgfilter3.csv", num_splits=num_groups, training=TRUE, average=TRUE)
-write.csv(B, "6_20_training_matrix_v1.csv", row.names=TRUE)
+V <- generateMatrix("7_15_cpgfilter3.csv", num_splits=num_groups, training=TRUE, average=FALSE)
+write.csv(V, "7_15_variance_matrix_v1.csv", row.names=TRUE)
+B <- generateMatrix("7_15_cpgfilter3.csv", num_splits=num_groups, training=TRUE, average=TRUE)
+write.csv(B, "7_15_training_matrix_v1.csv", row.names=TRUE)
 ```
 
 Compare average and variance matrices (for training data) and filter out sites that have SD > cutoff (calculated by transforming the beta matrix) at more than 1 age point
@@ -453,19 +1405,19 @@ filterBySDComparison <- function(path_to_variance_matrix, path_to_avg_matrix, tr
   return(final_site_list)
 }
 
-second_filter <- filterBySDComparison("6_20_variance_matrix_v1.csv", "6_20_training_matrix_v1.csv") 
+second_filter <- filterBySDComparison("6_30_variance_matrix_v1.csv", "6_30_training_matrix_v1.csv") 
 print(length(second_filter))
-#write.csv(second_filter, "6_20_cpgfilter4.csv")
+write.csv(second_filter, "6_30_cpgfilter4.csv")
 ```
 
 Regenerate training and testing matrices using generateMatrix() function to move onto clustering
 
 ```{r}
-Z <- generateMatrix("6_20_cpgfilter4.csv", num_splits=num_groups, training=TRUE, average=TRUE)
-write.csv(Z, "6_20_training_matrix_v2.csv", row.names=TRUE)
+Z <- generateMatrix("6_30_cpgfilter4.csv", num_splits=num_groups, training=TRUE, average=TRUE)
+write.csv(Z, "6_30_training_matrix_v2.csv", row.names=TRUE)
 
-P <- generateMatrix("6_20_cpgfilter4.csv", num_splits=num_groups, training=FALSE, average=TRUE)
-write.csv(P, "6_20_testing_matrix_v2.csv", row.names=TRUE)
+P <- generateMatrix("6_30_cpgfilter4.csv", num_splits=num_groups, training=FALSE, average=TRUE)
+write.csv(P, "6_30_testing_matrix_v2.csv", row.names=TRUE)
 ```
 
 Format and clean up matrices

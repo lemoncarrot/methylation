@@ -267,7 +267,9 @@ overlap <- intersect(site1, site2)
 
 
 #old arbitrary variance filter
-varianceFilter <- function(num_splits, sites, threshold=0.01, training=TRUE) {
+varianceFilter <- function(num_splits, folder_with_pre_filter, threshold=0.01, training=TRUE) {
+  sites <- read.csv(folder_with_pre_filter)
+  sites <- sites$x
   subset_folder <- testing_subset_folder
   if (training) {
     subset_folder <- training_subset_folder
@@ -295,10 +297,8 @@ varianceFilter <- function(num_splits, sites, threshold=0.01, training=TRUE) {
   return(all_sites)
 }
 
-sites <- read.csv("6_19_cpgfilter_changes.csv")
-sites <- sites$x
-sites_filtered_2 <- varianceFilter(num_groups, sites, training=TRUE)
-write.csv(sites_filtered_2, "6_19_cpgfilter2.csv")
+sites_filtered2 <- varianceFilter(num_groups, "6_20_cpgfilter2.csv", training=TRUE)
+write.csv(sites_filtered2, "6_20_cpgfilter3.csv")
     
 #5_18_filtered_sites.csv is filtered with correlations
 #5_28 is filtered with correlations AND arbitrary 0.015 variance

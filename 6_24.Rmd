@@ -3,9 +3,9 @@ title: "6_24"
 output: html_notebook
 ---
 
-Generate new splits but with all the samples
-- rework file paths 
-- rework NUMSPLITS and cpgs in each split (change dimensions)
+- try row_km to split the dendrogram -> check performance of clusters
+
+# Load packages
 
 ```{r}
 library(readr)
@@ -13,7 +13,19 @@ library(readxl)
 library(DunedinPACE)
 library(data.table)
 library(pheatmap)
+library(ComplexHeatmap)
+library(circlize)
+library(dplyr)
+library(tidyverse)
+library(splines)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(ReactomePA)
+```
 
+# Extract CpG sites from Investigated Clocks
+
+```{r}
 Hannum_CpGs <- read_excel("CpGsToInvestigate/hannum_cpgs.xlsx")
 Hannum_CpGs <- Hannum_CpGs$Marker #71
 Levine_CpGs <- read.csv("CpGsToInvestigate/levine_cpgs.csv", stringsAsFactors=FALSE)
@@ -21,37 +33,321 @@ Levine_CpGs <- Levine_CpGs[-1, ]
 Levine_CpGs <- Levine_CpGs$CpG #513
 Horvath_CpGs <- read.csv("CpGsToInvestigate/horvath_cpgs.csv", stringsAsFactors=FALSE)
 Horvath_CpGs <- Horvath_CpGs[-(1:3), 1, drop=FALSE]
-Horvath_CpGs <- Horvath_CpGs[, 1] #350
+Horvath_CpGs <- Horvath_CpGs[, 1] #353
 McEwen_CpGs <- read.csv("CpGsToInvestigate/mcewen_cpgs.csv")
 McEwen_CpGs <- McEwen_CpGs$CPG #94
-#Wu
 Wu_CpGs <- read_excel("CpGsToInvestigate/aging-11-102399-s003..xlsx")
 Wu_CpGs <- Wu_CpGs[-1, ]
-Wu_CpGs <- Wu_CpGs$CpGs
+Wu_CpGs <- Wu_CpGs$CpGs #111
 Belsky_CpGs <- getRequiredProbes(backgroundList=FALSE)
-Belsky_CpGs <- unlist(Belsky_CpGs)
+Belsky_CpGs <- unlist(Belsky_CpGs) #173
+load("CpGsToInvestigate/epitoc.Rd")
+Teschendorff_CpGs <- as.data.frame(dataETOC2.l[1])
+Teschendorff_CpGs <- rownames(Teschendorff_CpGs) #163
+Shireby_CpGs <- readLines("CpGsToInvestigate/CorticalClockCoefs.txt")[-1]
+Shireby_CpGs <- sapply(strsplit(Shireby_CpGs, " "), `[`, 1)
+Shireby_CpGs <- unlist(Shireby_CpGs) #347
+Lu2_CpGs <- read_excel("CpGsToInvestigate/lu2.xlsx")
+Lu2_CpGs <- rbind(colnames(Lu2_CpGs), Lu2_CpGs)
+Lu2_CpGs <- Lu2_CpGs[, 1]
+Lu2_CpGs <- as.character(Lu2_CpGs[[1]]) #140
+clock_cpgs <- list(
+  McEwen_CpGs = McEwen_CpGs,
+  Wu_CpGs = Wu_CpGs,
+  Hannum_CpGs = Hannum_CpGs,
+  Horvath_CpGs = Horvath_CpGs,
+  Levine_CpGs = Levine_CpGs,
+  Belsky_CpGs = Belsky_CpGs,
+  Teschendorff_CpGs = Teschendorff_CpGs,
+  Shireby_CpGs = Shireby_CpGs,
+  Lu2_CpGs = Lu2_CpGs
+)
 
-list_of_cpgs <- list(Hannum_CpGs, Horvath_CpGs,
-                    Levine_CpGs, McEwen_CpGs, Wu_CpGs, Belsky_CpGs)
+cpgs <- unlist(clock_cpgs)
+cpgs <- unique(cpgs) #1868 total sites
 
-cpgs <- unlist(list_of_cpgs)
-cpgs <- unique(cpgs) #1247 total sites
+print(paste0("Total Unique CpG sites from 9 clocks explored: ", length(cpgs)))
 
-#write.csv(cpgs, "6_27_overlap.csv")
+#write.csv(cpgs, "7_3_overlap.csv")
+```
+To test
+
+```{r}
+generateMatrix <- function(gender_state=1, clock_state=TRUE, output_file_path1, output_file_path2) {
+  # Initialize input path
+  list_files <- list.files(path="/Users/kchen/OneDrive/Documents/methylation/combined_split3")
+  # Extract number of splits
+  num_files <- length(list_files)
+  
+  # initial_cpg_list contains the full list of CpGs (from preinitializing chunk)
+  # NUMCPGSITE is length of initial_cpg_list (from preinitializing chunk)
+  
+  # initial_clock_list contains the list of Clock CpGs
+  # NUMCPGSITECLOCK is length of initial_clock_list
+  
+  # Create empty output matrix
+  if (clock_state) {
+    B <- createEmptyMatrix(NUMCPGSITECLOCK, initial_clock_list, 0, 100)
+    S <- createEmptyMatrix(NUMCPGSITECLOCK, initial_clock_list, 0, 100)
+  } else {
+    B <- createEmptyMatrix(NUMCPGSITE, initial_cpg_list, 0, 100)
+    S <- createEmptyMatrix(NUMCPGSITE, initial_cpg_list, 0, 100)
+  }
+  
+  # Loop through all splits
+  for (i in 1:num_files) {
+    # Read split from folder
+    temp <- fread(paste0("/Users/kchen/OneDrive/Documents/methylation/combined_split3/", list_files[i]))
+    # Format:
+    # - First two columns are identical: "V1", "cpg"
+    #  - contain "age" then CpG identifiers
+    # - Column names are GSM IDs
+    # - First Row contains ages
+    
+    # Format split
+    temp <- as.data.frame(temp)
+    # Set rownames
+    rownames(temp) <- temp[, 1]
+    temp <- temp[, -c(1, 2)]
+    # Round non-integer ages
+    temp["age", ] <- round(temp["age", ])
+  
+    # Filter for desired samples (gender-stratified)
+    if (gender_state == 1) {
+      temp <- temp[, colnames(temp) %in% all_samples]
+    } else if (gender_state == 2) {
+      temp <- temp[, colnames(temp) %in% male_samples]
+    } else if (gender_state == 3) {
+      temp <- temp[, colnames(temp) %in% female_samples]
+    } else {
+      print("Error")
+      break
+    }
+    
+    # Reshape temp for data.table operations
+    temp_melt <- melt(temp, id.vars = "age")
+    setDT(temp_melt)
+    
+    # Calculate mean and sd for each age group
+    results <- temp_melt[, .(mean_value = mean(value, na.rm = TRUE), sd_value = sd(value, na.rm = TRUE)), by = .(age, variable)]
+    
+    # Reshape results back to wide format
+    mean_wide <- dcast(results, variable ~ age, value.var = "mean_value")
+    sd_wide <- dcast(results, variable ~ age, value.var = "sd_value")
+    
+    # Assign back to matrices
+    for (j in 0:100) {
+      age_col <- paste0("age_", j)
+      B[ident, age_col] <- mean_wide[[as.character(j)]]
+      S[ident, age_col] <- sd_wide[[as.character(j)]]
+    }
+    
+    # Logging
+    print(paste0("Processing Split ", i))
+    gc()
+  }
+  
+  print("Writing files now")
+  fwrite(B, output_file_path1, row.names = TRUE)
+  fwrite(S, output_file_path2, row.names = TRUE)
+}
+
+generateMatrix(gender_state = 1, clock_state = FALSE, "7_19_all_matrix_avg.csv", "7_19_all_matrix_sd.csv")
+
+```
+
+```{r}
+
+# Filter for avg_beta correlation > corr_cutoff, avg_beta abs change > abs_change_cutoff,
+# less than num_sd_cutoff ages have SD > sd_coeff_cutoff * sqrt(avg_beta * (1-avg_beta))
+# gender_state: 1 = no stratification, 2 = male, 3 = female
+filterCpGResults <- function(corr_cutoff, abs_change_cutoff, sd_coeff_cutoff, num_sd_cutoff, gender_state) {
+  # Initialize input path
+  list_files <- list.files(path="/Users/kchen/OneDrive/Documents/methylation/combined_split3")
+  # Extract number of splits
+  num_files <- length(list_files)
+  # Create results format (Key: Age Window, Value: All sites fulfilling criteria)
+  results <- data.frame()
+  
+  # initial_cpg_list contains the full list of CpGs (from preinitializing chunk)
+  # NUMCPGSITE is length of initial_cpg_list (from preinitializing chunk)
+  
+  # Loop through every split
+  for (i in 1:num_files) {
+    # Read split from folder
+    temp <- fread(paste0("/Users/kchen/OneDrive/Documents/methylation/combined_split3/", list_files[i]))
+    # Format:
+    # - First two columns are identical: "V1", "cpg"
+    #  - contain "age" then CpG identifiers
+    # - Column names are GSM IDs
+    # - First Row contains ages
+    
+    # Format split
+    temp <- as.data.frame(temp)
+    rownames(temp) <- temp[, 1]
+    temp <- temp[, -c(1, 2)]
+    # Round non-integer ages
+    temp["age", ] <- round(temp["age", ])
+  
+    # Filter for desired samples (gender-stratified)
+    if (gender_state==1) {
+      temp <- temp[, colnames(temp) %in% all_samples]
+    } else if (gender_state==2) {
+      temp <- temp[, colnames(temp) %in% male_samples]
+    } else if (gender_state==3) {
+      temp <- temp[, colnames(temp) %in% female_samples]
+    } else {
+      print("Error")
+      break
+    }
+    
+    # Save identifiers to examine
+    ident <- rownames(temp[-1, ])
+    NUMCPGSITE <- length(ident)
+    
+    # Loop through age windows
+    for (start_age in seq(0, 60, by=5)) {
+      end_age <- start_age + 20
+      
+      # Create Empty Average Matrix
+      A <- createEmptyMatrix(NUMCPGSITE, ident, start_age, end_age)
+      # Create Empty SD Matrix
+      S <- createEmptyMatrix(NUMCPGSITE, ident, start_age, end_age)
+      
+      # Filter for only samples in age range [0, 20], [20, 40]...
+      # Ages 20, 40, 60 will overlap between windows
+      des_cols <- which(temp["age", ]>= start_age & temp["age", ]<=end_age)
+      temp2 <- temp[, des_cols]
+      
+      # Loop through every age in age window
+      for (j in start_age:end_age) {
+        des_cols2 <- which(temp2["age", ]==j)
+        # Ensure samples are present at age j
+        if (length(des_cols2)>0) {
+          temp3 <- temp2[, des_cols2]
+          # Remove age row
+          temp3 <- temp3[-1, ]
+          setDT(temp3)
+          
+          #Vectorize computations for all sites in split i for age j
+          average_vector <- temp3[, .(final = rowMeans(.SD, na.rm=TRUE)), by=.I]
+          average_vector <- as.data.frame(average_vector)
+          sd_vector <- temp3[, .(final = apply(.SD, 1, sd, na.rm=TRUE)), by=.I]
+          sd_vector <- as.data.frame(sd_vector)
+          
+          # Assign back to matrices
+          A[, paste0("age_", j)] <- average_vector$final
+          S[, paste0("age_", j)] <- sd_vector$final
+          
+          # Logging
+          #print("Processing age ", j)
+        }
+      }
+      
+      # Both matrices for age_window have finished computing
+      # Start filtering process
+      
+      # Initialize results matrix
+      results <- data.frame(matrix(nrow=nrow(A), ncol=3))
+      rownames(results) <- rownames(A)
+      colnames(results) <- c("sd_res", "cor_res", "abs_change_res")
+      
+      # Fill in sd_res
+      for (k in 1:nrow(A)) {
+        count <- 0
+        # Count how many are above SD threshold
+        for (l in 1:ncol(A)) {
+          adj_avg <- sd_coeff_cutoff * sqrt(A[k, l] * (1-A[k, l]))
+          sd <- S[k, l]
+          if (!is.na(adj_avg) && !is.na(sd) && (sd > adj_avg)) {
+            count <- count + 1
+          }
+        }
+        results[k, "sd_res"] = count
+      }
+      
+      # Fill in cor_res
+      results$cor_res <- apply(A, 1, function(x) cor(x, start_age:end_age))
+      
+      # Fill in abs_change_res
+      results$abs_change_res <- apply(A, 1, function(x) max(x) - min(x))
+      
+      # Filter for sites that fit criterion
+      filtered_results <- results[results$sd_res<num_sd_cutoff & abs(results$cor_res)>corr_cutoff & results$abs_change_res>abs_change_cutoff, ]
+      selected_sites <- rownames(filtered_results)
+      
+      # Add to running list (from previous splits)
+      results_by_window[[paste(start_age, "to", end_age)]] <- c(results_by_window[[paste(start_age, "to", end_age)]], selected_sites)
+    }
+    gc()
+  }
+  return(results)
+}
+
+visualizeResults <- function(results) {
+  for (i in 1:length(results)) {
+    print(paste0("Start age: ", (i-1)*5, " End age: ", (i-1)*5+20, " Filtered: ", ... = length(results[[i]])))
+  }
+  all_sites <- unlist(results)
+  unique_sites <- unique(all_sites)
+  print(length(unique_sites))
+}
+
+results1 <- filterCpGs(0.4, 0.2, 0.5, 3, 1)
+visualizeResults(results1)
+results2 <- filterCpGs(0.3, 0.2, 0.5, 3, 1)
+visualizeResults(results2)
+results3 <- filterCpGs(0.4, 0.2, 0.5, 2, 1)
+visualizeResults(results3)
+results4 <- filterCpGs(0.3, 0.2, 0.5, 2, 1)
+visualizeResults(results4)
 ```
 
 
+
+More tools
+
+```{r}
+createEmptyMatrix <- function(NUMCPGSITE, cpg_list, start_age, end_age) {
+  B <- matrix(NA, nrow=NUMCPGSITE, ncol = end_age - start_age + 1)
+  age_range <- start_age:end_age
+  rownames(B) <- cpg_list
+  column_names <- character(end_age - start_age + 1)
+  for (i in 1:(end_age - start_age + 1)) {
+    column_names[i] <- paste0("age_", i-1+start_age)
+  }
+  colnames(B) <- column_names
+  return(B)
+}
+
+formatMatrix <- function(matrix_path) {
+  temp <- readr::read_csv(matrix_path)
+  #remove columns with all NA values
+  temp <- temp[, colSums(is.na(temp)) != nrow(temp)]
+  cpg_site_names <- temp[[1]]
+  temp <- temp[, -1, with = FALSE]
+  temp <- as.data.frame(temp)
+  rownames(temp) <- cpg_site_names
+  temp <- t(scale(t(temp)))
+  temp <- as.matrix(temp)
+  colnames(temp) <- gsub("age_", "", colnames(temp))
+  return(temp)
+}
+```
+
+
+
+# Make matrix of 1868 sites x total samples
 ```{r}
 training_datasets <- c("GSE50660", "GSE90124", "GSE40279", "GSE67705", "GSE61256", "GSE73103", "GSE124366")
 testing_datasets <- c("GSE114134", "GSE89253", "GSE53740", "GSE85568", "GSE106648", "GSE51057", "GSE124076")
 all_datasets <- c(training_datasets, testing_datasets)
 combined_path <- "/Users/kchen/OneDrive/Documents/methylation/combined18/"
 # Read desired CpG sites from overlappingSites()
-initial_cpg_list <- read.csv("6_27_overlap.csv")
+initial_cpg_list <- read.csv("7_3_overlap.csv") #check filter before running
 initial_cpg_list <- initial_cpg_list$x
 # Extract number of sites
 NUMCPGSITE <- length(initial_cpg_list)
-
 standardizeDataset <- function(df_name, desired_cpgs) {
   df <- readr::read_csv(paste0(combined_path, df_name, "_df.csv"))
   # Extract ages
@@ -76,17 +372,17 @@ makeChunks <- function(datasets, output_folder) {
       temp <- cbind(temp, df)
     }
   }
-  write.csv(temp, file = paste0(output_folder, "partition_", 1, ".csv"), row.names = TRUE)
+  write.csv(temp, file = paste0(output_folder, "partition3_", 1, ".csv"), row.names = TRUE)
 }
 
 # Run code
 makeChunks(all_datasets, "/Users/kchen/OneDrive/Documents/methylation/combined_split/")
 ```
 
-New filter -> all CpGs from Horvath, PhenoAge, Hannum, PedBE, and new paper (in CpGsToInvestigate folder)
+# Reduce to a matrix of 1868 sites x 100 ages (avg betas)
 
 ```{r}
-generateMatrix2 <- function(file_with_pre_filter, average) {
+generateMatrix2 <- function(file_with_pre_filter, average, gender=FALSE, male=TRUE) {
   sites <- read.csv(file_with_pre_filter)
   sites <- sites[, -1]
   sites <- as.character(sites)
@@ -101,9 +397,7 @@ generateMatrix2 <- function(file_with_pre_filter, average) {
     column_names[i+1] <- paste0("age_", i)
   }
   colnames(B) <- column_names
-
-  i=1
-  temp <- readr::read_csv(paste0("/Users/kchen/OneDrive/Documents/methylation/combined_split/", "partition_", i, ".csv"))
+  temp <- readr::read_csv(paste0("/Users/kchen/OneDrive/Documents/methylation/combined_split/", "partition3_", 1, ".csv"))
   # Remove extra first column (automatic indices)
   temp <- temp[, -1]
   #filter for sites from correlation function
@@ -111,6 +405,13 @@ generateMatrix2 <- function(file_with_pre_filter, average) {
   temp <- temp[c(1, des_rows), ] #keep ages in the first row
   # Extract CpG site list
   identifiers <- temp[-1, ncol(temp)]
+  if (gender==TRUE) {
+    if (male==TRUE) {
+      temp <- temp[, colnames(temp) %in% male_samples]
+    } else if (male==FALSE) {
+      temp <- temp[, colnames(temp) %in% female_samples]
+    }
+  }
   for (j in 0:100) {
     # DEBUG // print(paste0("Split: ", i, " Age: ", j))
     des_cols <- which(temp[1, ]==j)
@@ -145,55 +446,397 @@ generateMatrix2 <- function(file_with_pre_filter, average) {
   return(B)
 }
 
-V <- generateMatrix2("6_27_overlap.csv", average=TRUE)
-write.csv(V, "6_27_small_matrix.csv", row.names=TRUE)
+V <- generateMatrix2("7_3_overlap.csv", average=TRUE, gender=FALSE)
+#write.csv(V, "7_3_small_matrix2.csv", row.names=TRUE)
+M <- generateMatrix2("7_3_overlap.csv", average=TRUE, gender=TRUE, male=TRUE)
+#write.csv(M, "7_3_male_matrix2.csv", row.names=TRUE)
+Fe <- generateMatrix2("7_3_overlap.csv", average=TRUE, gender=TRUE, male=FALSE)
+#write.csv(Fe, "7_3_female_matrix2.csv", row.names=TRUE)
+
+#6_30_cpgfilter4.csv contains our filtered CpGs from the pipeline (file methylation_patterns.Rmd)
 ```
 
+# Initialize Annotation Matrix
 ```{r}
-B <- readr::read_csv("6_27_small_matrix.csv")
-B <- B[, colSums(is.na(B)) != nrow(B)]
-cpg_site_names <- B[[1]]
-B <- B[, -1, with = FALSE]
+B <- readr::read_csv("7_3_small_matrix2.csv")
 B <- as.data.frame(B)
-rownames(B) <- cpg_site_names
-```
+rownames(B) <- B[, 1]
 
-
-```{r}
-library(ComplexHeatmap)
-library(circlize)
-
-clocks <- c("Hannum", "Horvath", "Levine", "McEwen", "Wu", "Belsky")
+clocks <- c("McEwen", "Wu", "Hannum", "Horvath", "Levine", "Belsky", "Teschendorff", "Shireby", "Lu")
 clock_annotations <- data.frame(matrix(ncol = length(clocks), nrow = length(rownames(B))))
 names(clock_annotations) <- clocks
 rownames(clock_annotations) <- rownames(B)
 
+clock_annotations$McEwen[rownames(B) %in% McEwen_CpGs] <- 1
+clock_annotations$Wu[rownames(B) %in% Wu_CpGs] <- 1
 clock_annotations$Hannum[rownames(B) %in% Hannum_CpGs] <- 1
 clock_annotations$Horvath[rownames(B) %in% Horvath_CpGs] <- 1
 clock_annotations$Levine[rownames(B) %in% Levine_CpGs] <- 1
-clock_annotations$McEwen[rownames(B) %in% McEwen_CpGs] <- 1
-clock_annotations$Wu[rownames(B) %in% Wu_CpGs] <- 1
 clock_annotations$Belsky[rownames(B) %in% Belsky_CpGs] <- 1
+clock_annotations$Teschendorff[rownames(B) %in% Teschendorff_CpGs] <- 1
+clock_annotations$Shireby[rownames(B) %in% Shireby_CpGs] <- 1
+clock_annotations$Lu[rownames(B) %in% Lu2_CpGs] <- 1
 
 clock_annotations[is.na(clock_annotations)] <- 0
 
-B <- t(scale(t(B)))
-B <- as.matrix(B)
-colnames(B) <- gsub("age_", "", colnames(B))
-
 ha = rowAnnotation(df = clock_annotations, col = list(
+    McEwen = c("0" = "gray", "1" = "purple"),
+    Wu = c("0" = "gray", "1" = "orange"),
     Hannum = c("0" = "gray", "1" = "red"),
     Horvath = c("0" = "gray", "1" = "blue"),
     Levine = c("0" = "gray", "1" = "green"),
-    McEwen = c("0" = "gray", "1" = "purple"),
-    Wu = c("0" = "gray", "1" = "orange"),
-    Belsky = c("0" = "gray", "1" = "yellow")
-))
+    Belsky = c("0" = "gray", "1" = "yellow"),
+    Teschendorff = c("0" = "gray", "1" = "pink"),
+    Shireby = c("0" = "gray", "1" = "magenta"),
+    Lu = c("0" = "gray", "1" = "maroon")),
+    simple_anno_size = unit(4, "mm"),
+    show_legend=c(FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE)
+)
+```
 
 
-Heatmap(B, 
-        name = "Beta Values", 
+# Function to take in input matrix path, and number of clusters to plot
+- returns matrix with cluster annotations in the last column
+```{r}
+mainPipeline <- function(matrix_path, num_clusters, row_title, plot=TRUE, save=FALSE, age_cutoff=100, clock=TRUE) {
+  B <- formatMatrix(matrix_path)
+  columns_to_keep <- as.numeric(colnames(B)) < age_cutoff
+  B <- B[, columns_to_keep]
+  #draw heatmap
+  if (clock==TRUE) {
+    ht <- Heatmap(B, 
+        name = "Scaled Beta Values", 
         right_annotation = ha, 
+        show_row_names = FALSE, 
+        show_column_names = TRUE,
+        cluster_rows = TRUE,
+        cluster_columns = FALSE,
+        row_title = row_title, 
+        column_title = "Ages",
+        column_names_gp = gpar(fontsize = 4, fontface="plain", fontfamily="serif"),
+        column_names_rot = 0,
+        row_split = num_clusters
+  )
+  } else {
+    ht <- Heatmap(B, 
+        name = "Scaled Beta Values", 
+        #right_annotation = ha, 
+        show_row_names = FALSE, 
+        show_column_names = TRUE,
+        cluster_rows = TRUE,
+        cluster_columns = FALSE,
+        row_title = row_title, 
+        column_title = "Ages",
+        column_names_gp = gpar(fontsize = 4, fontface="plain", fontfamily="serif"),
+        column_names_rot = 0,
+        row_split = num_clusters
+  )
+  }
+  if (plot==TRUE) {
+      if (save==TRUE) {
+        png(paste0("july_figures/", matrix_path, num_clusters, "heatmap.png"))
+      }
+      ht <- draw(ht)
+      if (save==TRUE) { 
+        dev.off()
+      }
+  }
+  cluster_assignments <- row_order(ht)
+  cluster_vector <- unlist(lapply(1:length(cluster_assignments), function(i) {
+    rep(i, length(cluster_assignments[[i]]))
+  }))
+  B_with_clusters <- cbind(B, Cluster=cluster_vector[order(unlist(cluster_assignments))])
+  B_with_clusters <- as.data.frame(B_with_clusters)
+  
+  for (j in 1:num_clusters) {
+    df <- B_with_clusters[which(B_with_clusters$Cluster==j),]
+    long_df <- df %>%
+      rownames_to_column(var="Sample") %>%
+      pivot_longer(cols=-c("Sample"), names_to="Age", values_to="Beta") %>%
+      mutate(Age=as.numeric(Age))
+    long_df <- na.omit(long_df)
+    
+    fit <- lm(Beta ~ bs(Age, df=5), data=long_df)
+    long_df$Fitted <- predict(fit)
+    
+    a <- ggplot(long_df, aes(x = Age, y = Beta)) +
+      geom_point(size = 1) +
+      geom_line(aes(y = Fitted), color = "blue") +
+      #geom_smooth(method = "loess", formula = y ~ x, se = TRUE, color = "blue", fill = "lightblue", span = 0.75) +
+      labs(title = paste("Cluster", j), x = "Age", y = "Scaled Beta Values") +
+      theme_minimal() +
+      ylim(-5, 5)
+    if (plot==TRUE) {
+      print(a)
+    }  
+    
+    if (save==TRUE) {
+      ggsave(filename=paste0("july_figures/", matrix_path, "Cluster_", j, ".png"), plot=a)
+    }
+  }
+  return(B_with_clusters)
+}
+```
+
+- "6_30_testing_matrix_v2.csv" is our selected CpGs
+- "7_3_small_matrix2.csv" is combined Clock CpGs
+- "7_3_male_matrix2.csv" is male Clock CpGs
+- "7_3_female_matrix2.csv" is female Clock CpGs
+
+```{r}
+B_with_clusters <- mainPipeline("7_3_small_matrix2.csv", 4, "Clock CpGs", plot=TRUE, save=TRUE)
+```
+```{r}
+B_with_clusters <- mainPipeline("7_3_small_matrix2.csv", 5, "Clock CpGs", plot=TRUE, save=FALSE)
+B_with_clusters <- mainPipeline("7_3_small_matrix2.csv", 6, "Clock CpGs", plot=TRUE, save=FALSE)
+```
+
+
+```{r}
+C_with_clusters <- mainPipeline("6_30_testing_matrix_v2.csv", 4, "Selected CpGs", plot=TRUE, save=TRUE, age_cutoff=100, clock=FALSE)
+```
+
+```{r}
+M_with_clusters <- mainPipeline("7_3_male_matrix2.csv", 4, "Selected CpGs", plot=TRUE, save=FALSE, age_cutoff=80, clock=TRUE)
+```
+
+```{r}
+Fe_with_clusters <- mainPipeline("7_3_female_matrix2.csv", 4, "Selected CpGs", plot=TRUE, save=FALSE, age_cutoff=80, clock=TRUE)
+```
+
+
+Clock CpG enrichment
+
+```{r}
+library(RColorBrewer)
+
+#Fischer's exact test
+fischers <- function(cont_table, clock_name) {
+  p_values <- numeric(num_clusters)
+  for (i in 1:num_clusters) {
+    in_cluster <- cont_table[2*i-1, paste0(clock_name, "_clock_cpgs")]
+    not_in_cluster <- cont_table[2*i, paste0(clock_name, "_clock_cpgs")]
+    total_in_cluster <- sum(cont_table[2*i-1, -1])
+    total_not_in_cluster <- sum(cont_table[2*i, -1])
+    
+    matrix_m <- matrix(c(in_cluster, total_in_cluster - in_cluster,
+                        not_in_cluster, total_not_in_cluster - not_in_cluster),
+                      nrow=2)
+    
+    fisher_test <- fisher.test(matrix_m)
+    p_values[i] <- fisher_test$p.value
+  }
+  return(p_values)
+}
+
+clusterEnrichment <- function(matrix_with_clusters, num_clusters) {
+  clusters <- lapply(1:num_clusters, function(i) rownames(matrix_with_clusters)[which(matrix_with_clusters[, ncol(matrix_with_clusters)] == i)])
+  
+  cont_table <- data.frame(
+    clusters = character(),
+    mcewen_clock_cpgs = integer(),
+    wu_clock_cpgs = integer(),
+    hannum_clock_cpgs = integer(),
+    horvath_clock_cpgs = integer(),
+    levine_clock_cpgs = integer(),
+    belsky_clock_cpgs = integer(),
+    teschendorff_clock_cpgs = integer(),
+    shireby_clock_cpgs = integer(),
+    lu_clock_cpgs = integer(),
+    stringsAsFactors = FALSE
+  )
+  
+  cpg_count_table <- matrix(0, nrow = num_clusters, ncol = length(clock_cpgs))
+  colnames(cpg_count_table) <- names(clock_cpgs)
+  rownames(cpg_count_table) <- paste("Cluster", 1:num_clusters)
+  
+  for (i in 1:num_clusters) {
+    cluster_cpgs <- clusters[[i]]
+    mcewen_clock_cpgs <- sum(cluster_cpgs %in% McEwen_CpGs)
+    wu_clock_cpgs <- sum(cluster_cpgs %in% Wu_CpGs)
+    hannum_clock_cpgs <- sum(cluster_cpgs %in% Hannum_CpGs)
+    horvath_clock_cpgs <- sum(cluster_cpgs %in% Horvath_CpGs)
+    levine_clock_cpgs <- sum(cluster_cpgs %in% Levine_CpGs)
+    belsky_clock_cpgs <- sum(cluster_cpgs %in% Belsky_CpGs)
+    teschendorff_clock_cpgs <- sum(cluster_cpgs %in% Teschendorff_CpGs)
+    shireby_clock_cpgs <- sum(cluster_cpgs %in% Shireby_CpGs)
+    lu_clock_cpgs <- sum(cluster_cpgs %in% Lu2_CpGs)
+  
+    cpg_count_table[i, ] <- c(mcewen_clock_cpgs, wu_clock_cpgs, hannum_clock_cpgs, horvath_clock_cpgs, levine_clock_cpgs, belsky_clock_cpgs, teschendorff_clock_cpgs, shireby_clock_cpgs, lu_clock_cpgs)
+
+    cont_table <- rbind(cont_table, data.frame(
+      Cluster = paste0("In Cluster ", i),
+      mcewen_clock_cpgs = mcewen_clock_cpgs,
+      wu_clock_cpgs = wu_clock_cpgs,
+      hannum_clock_cpgs = hannum_clock_cpgs,
+      horvath_clock_cpgs = horvath_clock_cpgs,
+      levine_clock_cpgs = levine_clock_cpgs,
+      belsky_clock_cpgs = belsky_clock_cpgs,
+      teschendorff_clock_cpgs = teschendorff_clock_cpgs,
+      shireby_clock_cpgs = shireby_clock_cpgs,
+      lu_clock_cpgs = lu_clock_cpgs
+    ))
+    
+    cont_table <- rbind(cont_table, data.frame(
+      Cluster = paste0("Not In Cluster ", i),
+      mcewen_clock_cpgs = length(McEwen_CpGs) - mcewen_clock_cpgs,
+      wu_clock_cpgs = length(Wu_CpGs) - wu_clock_cpgs,
+      hannum_clock_cpgs = length(Hannum_CpGs) - hannum_clock_cpgs,
+      horvath_clock_cpgs = length(Horvath_CpGs) - horvath_clock_cpgs,
+      levine_clock_cpgs = length(Levine_CpGs) - levine_clock_cpgs,
+      belsky_clock_cpgs = length(Belsky_CpGs) - belsky_clock_cpgs,
+      teschendorff_clock_cpgs = length(Teschendorff_CpGs) - teschendorff_clock_cpgs,
+      shireby_clock_cpgs = length(Shireby_CpGs) - shireby_clock_cpgs,
+      lu_clock_cpgs = length(Lu2_CpGs) - lu_clock_cpgs
+    ))
+  }
+  
+  p_values_mcewen <- fischers(cont_table, "mcewen")
+  p_values_wu <- fischers(cont_table, "wu")
+  p_values_hannum <- fischers(cont_table, "hannum")
+  p_values_horvath <- fischers(cont_table, "horvath")
+  p_values_levine <- fischers(cont_table, "levine")
+  p_values_belsky <- fischers(cont_table, "belsky")
+  p_values_teschendorff <- fischers(cont_table, "teschendorff")
+  p_values_shireby <- fischers(cont_table, "shireby")
+  p_values_lu <- fischers(cont_table, "lu")
+  
+  
+  all_p_values <- c(p_values_mcewen, p_values_wu, p_values_hannum, p_values_horvath, p_values_levine, p_values_belsky, p_values_teschendorff, p_values_shireby, p_values_lu)
+  
+  #adjust for multiple comparisons
+  adjusted_p_values <- p.adjust(all_p_values, method="BH")
+  
+  adjusted_p_values_mcewen <- adjusted_p_values[(3*num_clusters+1):(4*num_clusters)]
+  adjusted_p_values_wu <- adjusted_p_values[(4*num_clusters+1):(5*num_clusters)]
+  adjusted_p_values_hannum <- adjusted_p_values[1:num_clusters]
+  adjusted_p_values_horvath <- adjusted_p_values[(num_clusters+1):(2*num_clusters)]
+  adjusted_p_values_levine <- adjusted_p_values[(2*num_clusters+1):(3*num_clusters)]
+  adjusted_p_values_belsky <- adjusted_p_values[(5*num_clusters+1):(6*num_clusters)]
+  adjusted_p_values_teschendorff <- adjusted_p_values[(6*num_clusters+1):(7*num_clusters)]
+  adjusted_p_values_shireby <- adjusted_p_values[(7*num_clusters+1):(8*num_clusters)]
+  adjusted_p_values_lu <- adjusted_p_values[(8*num_clusters+1):(9*num_clusters)]
+  
+  
+  heatmap_data <- data.frame(
+    mcewen = adjusted_p_values_mcewen,
+    wu = adjusted_p_values_wu,
+    hannum = adjusted_p_values_hannum,
+    horvath = adjusted_p_values_horvath,
+    levine = adjusted_p_values_levine,
+    belsky = adjusted_p_values_belsky,
+    teschendorff = adjusted_p_values_teschendorff,
+    shireby = adjusted_p_values_shireby,
+    lu = adjusted_p_values_lu
+  )
+  rownames(heatmap_data) <- paste("Cluster", 1:num_clusters)
+  
+  annotation_matrix <- matrix("", nrow=num_clusters, ncol=9)
+  colnames(annotation_matrix) <- colnames(heatmap_data)
+  rownames(annotation_matrix) <- rownames(heatmap_data)
+  
+  for (i in 1:num_clusters) {
+    for (j in 1:9) {
+      if (heatmap_data[i, j] < 0.001) {
+        annotation_matrix[i, j] <- "***"
+      } else if (heatmap_data[i, j] < 0.01) {
+        annotation_matrix[i, j] <- "**"
+      } else if (heatmap_data[i, j] < 0.05) {
+        annotation_matrix[i, j] <- "*"
+      }
+    }
+  }
+  
+  p <- pheatmap(
+    -log10(heatmap_data),
+    cluster_rows = FALSE,
+    cluster_cols = FALSE,
+    display_numbers = annotation_matrix,
+    number_color = "black",
+    color = colorRampPalette(rev(brewer.pal(n = 7, name = "RdYlBu")))(100),
+    main = "-log10 Adjusted P-Values for CpG Enrichment in Clusters",
+  )
+  
+  print(p)
+  
+  cpg_count_table_df <- as.data.frame(cpg_count_table)
+  colnames(cpg_count_table_df) <- names(clock_cpgs)
+  rownames(cpg_count_table_df) <- paste("Cluster", 1:num_clusters)
+  print(cpg_count_table_df)
+}
+```
+
+```{r}
+B_with_clusters <- mainPipeline("7_3_small_matrix2.csv", 4, "hello", plot=FALSE)
+clusterEnrichment(B_with_clusters, 4)sum
+```
+
+
+Biological function enrichment
+
+```{r}
+annotation <- read.table("HM450.hg38.manifest.gencode.v36.tsv/HM450.hg38.manifest.gencode.v36.tsv", sep="\t", header=TRUE, quote="", comment.char="", fileEncoding = "UTF-8")
+rownames(annotation) <- annotation$probeID
+
+enrich <- function(sig_cpg, cluster) {
+  temp_ann <- annotation[sig_cpg, ]
+  genes <- temp_ann$genesUniq
+  genes <- as.data.frame(genes)
+  genes_unlist <- genes %>%
+    separate_rows(genes, sep=";") %>%
+    distinct()
+  genes_unlist <- na.omit(genes_unlist)
+  genes <- unlist(genes_unlist)
+  
+  #clean up gene version
+  genes <- gsub("\\..*", "", genes)
+  
+  go_bp <- as.data.frame(enrichGO(gene = genes, OrgDb = org.Hs.eg.db, keyType = "SYMBOL", 
+                      ont = "BP", pAdjustMethod = "BH", pvalueCutoff = 0.05))
+  cluster_name <- paste0("Cluster ", cluster)
+  if (nrow(go_bp)>0) {
+    go_bp$Cluster <- cluster_name
+  } 
+  return(list(bp=go_bp))
+}
+
+GOEnrich <- function(matrix_with_clusters, num_clusters) {
+  clusters <- lapply(1:num_clusters, function(i) rownames(matrix_with_clusters)[which(matrix_with_clusters[, ncol(matrix_with_clusters)] == i)])
+  go_bp_results <- data.frame()
+  for (i in 1:num_clusters) {
+    cluster_name <- paste0("Cluster ", i)
+    sig_cpg <- unlist(clusters[i])
+    enrichment_results <- enrich(sig_cpg, i)
+    
+    go_bp_results <- rbind(go_bp_results, enrichment_results$bp)
+  }
+  return(go_bp_results)
+}
+
+go_bp_results <- GOEnrich(B_with_clusters, 4)
+```
+
+Plot Our Selected CpGs
+
+```{r}
+D <- readr::read_csv("6_30_testing_matrix_v2.csv")
+D <- D[, colSums(is.na(D)) != nrow(D)]
+cpg_site_names <- D[[1]]
+D <- D[, -1, with = FALSE]
+D <- as.data.frame(D)
+rownames(D) <- cpg_site_names
+
+overlap2 <- intersect(cpgs, rownames(D))
+D <- D[!(rownames(D) %in% cpgs), ]
+
+D <- t(scale(t(D)))
+D <- as.matrix(D)
+colnames(D) <- gsub("age_", "", colnames(D))
+
+num_clusters = 4
+
+ht <- Heatmap(D, 
+        name = "Scaled Beta Values", 
         show_row_names = FALSE, 
         show_column_names = TRUE,
         cluster_rows = TRUE,
@@ -201,9 +844,166 @@ Heatmap(B,
         row_title = "CpG Sites", 
         column_title = "Ages",
         column_names_gp = gpar(fontsize = 4, fontface="plain", fontfamily="serif"),
-        column_names_rot = 0
+        column_names_rot = 0,
+        row_split = num_clusters
 )
+ht <- draw(ht)
+
+cluster_assignments <- row_order(ht)
+cluster_vector <- unlist(lapply(1:length(cluster_assignments), function(i) {
+  rep(i, length(cluster_assignments[[i]]))
+}))
+
+cluster_vector <- unlist(lapply(1:length(cluster_assignments), function(i) {
+  rep(i, length(cluster_assignments[[i]]))
+}))
+
+D_with_clusters <- cbind(D, Cluster = cluster_vector[order(unlist(cluster_assignments))])
+D_with_clusters <- as.data.frame(D_with_clusters)
+
+for (j in 1:num_clusters) {
+  df <- D_with_clusters[which(D_with_clusters$Cluster==j), ]
+  long_df <- df %>%
+    rownames_to_column(var="Sample") %>%
+    pivot_longer(cols=-c("Sample"), names_to="Age", values_to="Beta") %>%
+    mutate(Age=as.numeric(Age))
+
+  long_df <- na.omit(long_df)
+  fit <- lm(Beta ~ bs(Age, df = 5), data = long_df)
+  long_df$Fitted <- predict(fit)
+
+  a <- ggplot(long_df, aes(x = Age, y = Beta)) +
+    geom_point(size = 1) +
+    geom_line(aes(y = Fitted), color = "blue") +
+    #geom_smooth(method = "loess", formula = y ~ x, se = TRUE, color = "blue", fill = "lightblue", span = 0.75) +
+    labs(title = paste("Cluster", j), x = "Age", y = "Scaled Beta Values") +
+    theme_minimal()
+  print(a)
+}
 ```
+plot results for each gender
+```{r}
+D <- readr::read_csv("7_3_male_matrix.csv")
+D <- D[, colSums(is.na(D)) != nrow(D)]
+cpg_site_names <- D[[1]]
+D <- D[, -1, with = FALSE]
+D <- as.data.frame(D)
+rownames(D) <- cpg_site_names
+
+D <- t(scale(t(D)))
+D <- as.matrix(D)
+colnames(D) <- gsub("age_", "", colnames(D))
+
+num_clusters = 4
+
+ht <- Heatmap(D, 
+        name = "Scaled Beta Values", 
+        show_row_names = FALSE, 
+        show_column_names = TRUE,
+        cluster_rows = TRUE,
+        cluster_columns = FALSE,
+        row_title = "CpG Sites", 
+        column_title = "Ages",
+        column_names_gp = gpar(fontsize = 4, fontface="plain", fontfamily="serif"),
+        column_names_rot = 0,
+        row_split = num_clusters
+)
+ht <- draw(ht)
+
+cluster_assignments <- row_order(ht)
+cluster_vector <- unlist(lapply(1:length(cluster_assignments), function(i) {
+  rep(i, length(cluster_assignments[[i]]))
+}))
+
+cluster_vector <- unlist(lapply(1:length(cluster_assignments), function(i) {
+  rep(i, length(cluster_assignments[[i]]))
+}))
+
+D_with_clusters <- cbind(D, Cluster = cluster_vector[order(unlist(cluster_assignments))])
+D_with_clusters <- as.data.frame(D_with_clusters)
+
+for (j in 1:num_clusters) {
+  df <- D_with_clusters[which(D_with_clusters$Cluster==j), ]
+  long_df <- df %>%
+    rownames_to_column(var="Sample") %>%
+    pivot_longer(cols=-c("Sample"), names_to="Age", values_to="Beta") %>%
+    mutate(Age=as.numeric(Age))
+
+  long_df <- na.omit(long_df)
+  fit <- lm(Beta ~ bs(Age, df = 5), data = long_df)
+  long_df$Fitted <- predict(fit)
+
+  a <- ggplot(long_df, aes(x = Age, y = Beta)) +
+    geom_point(size = 1) +
+    geom_line(aes(y = Fitted), color = "blue") +
+    #geom_smooth(method = "loess", formula = y ~ x, se = TRUE, color = "blue", fill = "lightblue", span = 0.75) +
+    labs(title = paste("Cluster", j), x = "Age", y = "Scaled Beta Values") +
+    theme_minimal()
+  print(a)
+}
+```
+
+```{r}
+D <- readr::read_csv("7_3_female_matrix.csv")
+D <- D[, colSums(is.na(D)) != nrow(D)]
+cpg_site_names <- D[[1]]
+D <- D[, -1, with = FALSE]
+D <- as.data.frame(D)
+rownames(D) <- cpg_site_names
+
+D <- t(scale(t(D)))
+D <- as.matrix(D)
+colnames(D) <- gsub("age_", "", colnames(D))
+
+num_clusters = 4
+
+ht <- Heatmap(D, 
+        name = "Scaled Beta Values", 
+        show_row_names = FALSE, 
+        show_column_names = TRUE,
+        cluster_rows = TRUE,
+        cluster_columns = FALSE,
+        row_title = "CpG Sites", 
+        column_title = "Ages",
+        column_names_gp = gpar(fontsize = 4, fontface="plain", fontfamily="serif"),
+        column_names_rot = 0,
+        row_split = num_clusters
+)
+ht <- draw(ht)
+
+cluster_assignments <- row_order(ht)
+cluster_vector <- unlist(lapply(1:length(cluster_assignments), function(i) {
+  rep(i, length(cluster_assignments[[i]]))
+}))
+
+cluster_vector <- unlist(lapply(1:length(cluster_assignments), function(i) {
+  rep(i, length(cluster_assignments[[i]]))
+}))
+
+D_with_clusters <- cbind(D, Cluster = cluster_vector[order(unlist(cluster_assignments))])
+D_with_clusters <- as.data.frame(D_with_clusters)
+
+for (j in 1:num_clusters) {
+  df <- D_with_clusters[which(D_with_clusters$Cluster==j), ]
+  long_df <- df %>%
+    rownames_to_column(var="Sample") %>%
+    pivot_longer(cols=-c("Sample"), names_to="Age", values_to="Beta") %>%
+    mutate(Age=as.numeric(Age))
+
+  long_df <- na.omit(long_df)
+  fit <- lm(Beta ~ bs(Age, df = 5), data = long_df)
+  long_df$Fitted <- predict(fit)
+
+  a <- ggplot(long_df, aes(x = Age, y = Beta)) +
+    geom_point(size = 1) +
+    geom_line(aes(y = Fitted), color = "blue") +
+    #geom_smooth(method = "loess", formula = y ~ x, se = TRUE, color = "blue", fill = "lightblue", span = 0.75) +
+    labs(title = paste("Cluster", j), x = "Age", y = "Scaled Beta Values") +
+    theme_minimal()
+  print(a)
+}
+```
+
 
 
 BELOW IS OLD CODE
@@ -289,14 +1089,8 @@ pheatmap(as.matrix(original),  # Exclude cluster column
 Read annotations
 
 ```{r}
-annotation <- read.table(gzfile("HM450.hg38.manifest.tsv.gz"), sep="\t", header=TRUE, quote="", comment.char="", fileEncoding = "UTF-8")
 ```
 
-
-Pathway Enrichment Analysis
-
-- examine single dataset
-- 
 
 
 

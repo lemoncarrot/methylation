@@ -1,0 +1,618 @@
+---
+title: "6_24"
+output: html_notebook
+---
+
+Generate new splits but with all the samples
+- rework file paths 
+- rework NUMSPLITS and cpgs in each split (change dimensions)
+
+```{r}
+library(readr)
+library(readxl)
+library(DunedinPACE)
+library(data.table)
+library(pheatmap)
+
+Hannum_CpGs <- read_excel("CpGsToInvestigate/hannum_cpgs.xlsx")
+Hannum_CpGs <- Hannum_CpGs$Marker #71
+Levine_CpGs <- read.csv("CpGsToInvestigate/levine_cpgs.csv", stringsAsFactors=FALSE)
+Levine_CpGs <- Levine_CpGs[-1, ]
+Levine_CpGs <- Levine_CpGs$CpG #513
+Horvath_CpGs <- read.csv("CpGsToInvestigate/horvath_cpgs.csv", stringsAsFactors=FALSE)
+Horvath_CpGs <- Horvath_CpGs[-(1:3), 1, drop=FALSE]
+Horvath_CpGs <- Horvath_CpGs[, 1] #350
+McEwen_CpGs <- read.csv("CpGsToInvestigate/mcewen_cpgs.csv")
+McEwen_CpGs <- McEwen_CpGs$CPG #94
+#Wu
+Wu_CpGs <- read_excel("CpGsToInvestigate/aging-11-102399-s003..xlsx")
+Wu_CpGs <- Wu_CpGs[-1, ]
+Wu_CpGs <- Wu_CpGs$CpGs
+Belsky_CpGs <- getRequiredProbes(backgroundList=FALSE)
+Belsky_CpGs <- unlist(Belsky_CpGs)
+
+list_of_cpgs <- list(Hannum_CpGs, Horvath_CpGs,
+                    Levine_CpGs, McEwen_CpGs, Wu_CpGs, Belsky_CpGs)
+
+cpgs <- unlist(list_of_cpgs)
+cpgs <- unique(cpgs) #1247 total sites
+
+#write.csv(cpgs, "6_27_overlap.csv")
+```
+
+```{r}
+training_datasets <- c("GSE50660", "GSE90124", "GSE40279", "GSE67705", "GSE61256", "GSE73103", "GSE124366")
+testing_datasets <- c("GSE114134", "GSE89253", "GSE53740", "GSE85568", "GSE106648", "GSE51057", "GSE124076")
+all_datasets <- c(training_datasets, testing_datasets)
+combined_path <- "/Users/kchen/OneDrive/Documents/methylation/combined18/"
+# Read desired CpG sites from overlappingSites()
+#initial_cpg_list <- read.csv("6_20_cpgfilter1.csv") #check filter before running
+initial_cpg_list <- initial_cpg_list$x
+# Extract number of sites
+NUMCPGSITE <- length(initial_cpg_list)
+standardizeDataset <- function(df_name, desired_cpgs) {
+  df <- readr::read_csv(paste0(combined_path, df_name, "_df.csv"))
+  # Extract ages
+  ages <- df[1, ]
+  df <- df[-1, ]
+  template <- data.table(cpg=desired_cpgs)
+  # Reorder and filter by reference CpG sites
+  df <- merge(template, df, by.x="cpg", by.y="cpg", all.x=TRUE, sort=FALSE)
+  # Reattach ages
+  df <- rbind(ages, df)
+  
+  return(df)
+}
+
+makeChunks <- function(datasets, output_folder) {
+  temp <- data.frame()
+  for (dataset in datasets) {
+    df <- standardizeDataset(dataset, initial_cpg_list)
+    if (ncol(temp) == 0) {
+      temp <- df
+    } else {
+      temp <- cbind(temp, df)
+    }
+  }
+  write.csv(temp, file = paste0(output_folder, "partition_", 1, ".csv"), row.names = TRUE)
+}
+
+# Run code
+makeChunks(all_datasets, "/Users/kchen/OneDrive/Documents/methylation/combined_split/")
+```
+
+New filter -> all CpGs from Horvath, PhenoAge, Hannum, PedBE, and new paper (in CpGsToInvestigate folder)
+
+```{r}
+generateMatrix2 <- function(file_with_pre_filter, average) {
+  sites <- read.csv(file_with_pre_filter)
+  sites <- sites[, -1]
+  sites <- as.character(sites)
+  #length: 288962
+  NUMCPGSITE2 <- length(sites)
+  #initialize output matrixs
+  B <- matrix(NA, nrow=NUMCPGSITE2, ncol=101)
+  age_range <- 0:100
+  rownames(B) <- sites
+  column_names <- character(101)
+  for (i in age_range) {
+    column_names[i+1] <- paste0("age_", i)
+  }
+  colnames(B) <- column_names
+
+  i=1
+  temp <- readr::read_csv(paste0("/Users/kchen/OneDrive/Documents/methylation/combined_split/", "partition_", i, ".csv"))
+  # Remove extra first column (automatic indices)
+  temp <- temp[, -1]
+  #filter for sites from correlation function
+  des_rows <- which(temp$cpg...466 %in% sites)
+  temp <- temp[c(1, des_rows), ] #keep ages in the first row
+  # Extract CpG site list
+  identifiers <- temp[-1, ncol(temp)]
+  for (j in 0:100) {
+    # DEBUG // print(paste0("Split: ", i, " Age: ", j))
+    des_cols <- which(temp[1, ]==j)
+    # DEBUG // print(paste0("Columns at Age ", j, " : ", length(des_cols)))
+    # Check if there are samples at age j
+    if (length(des_cols)>0) {
+      # Filter for age j
+      age_data <- temp[, des_cols, drop = FALSE]
+      # Drop age row
+      age_data <- age_data[-1, ]
+      
+      #indice of identifiers corresponds to indice of age_data
+      #age_data has samples as column names, no other identifiers
+      # DEBUG // print(paste0("Dim of age_data: ", dim(age_data)))
+      #this step takes the longest
+      setDT(age_data)
+      # Vectorized averaging
+      if (average) {
+        aggregated <- age_data[, .(final = rowMeans(.SD, na.rm = TRUE)), by = .I]
+      }
+      if (!average) {
+        aggregated <- age_data[, .(final = apply(.SD, 1, sd, na.rm = TRUE)), by = .I]
+      }        
+      # DEBUG // print(paste0("Averaging done"))
+      aggregated <- as.data.frame(aggregated)
+      rownames(aggregated) <- as.character(identifiers$cpg...3952) #2441 for training, 1512 for testing
+      # Reassignment to matrix B
+      B[rownames(aggregated), paste0("age_", j)] <- aggregated$final
+      # DEBUG //print(paste0("Split: ", i, ", Age: ", j, " updated"))
+    }
+  }
+  return(B)
+}
+
+V <- generateMatrix2("6_27_overlap.csv", average=TRUE)
+write.csv(V, "6_27_small_matrix.csv", row.names=TRUE)
+```
+
+```{r}
+B <- readr::read_csv("6_30_testing_matrix_v2.csv")
+B <- B[, colSums(is.na(B)) != nrow(B)]
+cpg_site_names <- B[[1]]
+B <- B[, -1, with = FALSE]
+B <- as.data.frame(B)
+rownames(B) <- cpg_site_names
+```
+
+
+```{r}
+library(ComplexHeatmap)
+library(circlize)
+
+clocks <- c("Hannum", "Horvath", "Levine", "McEwen", "Wu", "Belsky")
+clock_annotations <- data.frame(matrix(ncol = length(clocks), nrow = length(rownames(B))))
+names(clock_annotations) <- clocks
+rownames(clock_annotations) <- rownames(B)
+
+clock_annotations$Hannum[rownames(B) %in% Hannum_CpGs] <- 1
+clock_annotations$Horvath[rownames(B) %in% Horvath_CpGs] <- 1
+clock_annotations$Levine[rownames(B) %in% Levine_CpGs] <- 1
+clock_annotations$McEwen[rownames(B) %in% McEwen_CpGs] <- 1
+clock_annotations$Wu[rownames(B) %in% Wu_CpGs] <- 1
+clock_annotations$Belsky[rownames(B) %in% Belsky_CpGs] <- 1
+
+clock_annotations[is.na(clock_annotations)] <- 0
+
+B <- t(scale(t(B)))
+B <- as.matrix(B)
+colnames(B) <- gsub("age_", "", colnames(B))
+
+ha = rowAnnotation(df = clock_annotations, col = list(
+    Hannum = c("0" = "gray", "1" = "red"),
+    Horvath = c("0" = "gray", "1" = "blue"),
+    Levine = c("0" = "gray", "1" = "green"),
+    McEwen = c("0" = "gray", "1" = "purple"),
+    Wu = c("0" = "gray", "1" = "orange"),
+    Belsky = c("0" = "gray", "1" = "yellow")
+))
+
+# gap statistic to determine cluster number
+
+#too many NAs -> how to decide how many clusters?
+#library(cluster)
+#library(factoextra)
+#gap_statistic <- clusGap(B, FUN=kmeans, nstart=25, K.max=10, B=50)
+#fviz_gap_stat(gap_stat)
+
+#visual inspection?
+
+num_clusters = 4
+
+ht <- Heatmap(B, 
+        name = "Scaled Beta Values", 
+        right_annotation = ha, 
+        show_row_names = FALSE, 
+        show_column_names = TRUE,
+        cluster_rows = TRUE,
+        cluster_columns = FALSE,
+        row_title = "CpG Sites", 
+        column_title = "Ages",
+        column_names_gp = gpar(fontsize = 4, fontface="plain", fontfamily="serif"),
+        column_names_rot = 0,
+        row_split = num_clusters
+)
+
+ht <- draw(ht)
+
+#draw example heatmaps with 5 and 6 clusters to show not much improvement
+
+ht2 <- Heatmap(B, 
+        name = "Scaled Beta Values", 
+        right_annotation = ha, 
+        show_row_names = FALSE, 
+        show_column_names = TRUE,
+        cluster_rows = TRUE,
+        cluster_columns = FALSE,
+        row_title = "CpG Sites", 
+        column_title = "Ages",
+        column_names_gp = gpar(fontsize = 4, fontface="plain", fontfamily="serif"),
+        column_names_rot = 0,
+        row_split = 5
+)
+
+ht2 <- draw(ht2)
+
+ht3 <- Heatmap(B, 
+        name = "Scaled Beta Values", 
+        right_annotation = ha, 
+        show_row_names = FALSE, 
+        show_column_names = TRUE,
+        cluster_rows = TRUE,
+        cluster_columns = FALSE,
+        row_title = "CpG Sites", 
+        column_title = "Ages",
+        column_names_gp = gpar(fontsize = 4, fontface="plain", fontfamily="serif"),
+        column_names_rot = 0,
+        row_split = 6
+)
+
+ht3 <- draw(ht3)
+```
+
+```{r}
+library(dplyr)
+library(tidyverse)
+library(splines)
+
+cluster_assignments <- row_order(ht)
+
+cluster_vector <- unlist(lapply(1:length(cluster_assignments), function(i) {
+  rep(i, length(cluster_assignments[[i]]))
+}))
+
+B_with_clusters <- cbind(B, Cluster = cluster_vector[order(unlist(cluster_assignments))])
+B_with_clusters <- as.data.frame(B_with_clusters)
+
+for (i in 1:num_clusters) {
+ df <- B_with_clusters[which(B_with_clusters$Cluster==i), ]
+ long_df <- df %>%
+   rownames_to_column(var="Sample") %>%
+   pivot_longer(cols=-c("Sample"), names_to="Age", values_to="Beta") %>%
+   mutate(Age=as.numeric(Age))
+ 
+ long_df <- na.omit(long_df)
+
+ fit <- lm(Beta ~ bs(Age, df = 5), data = long_df)
+ long_df$Fitted <- predict(fit)
+ 
+ a <- ggplot(long_df, aes(x = Age, y = Beta)) +
+    geom_point(size = 1) +
+    geom_line(aes(y = Fitted), color = "blue") +
+    #geom_smooth(method = "loess", formula = y ~ x, se = TRUE, color = "blue", fill = "lightblue", span = 0.75) +
+    labs(title = paste("Cluster", i), x = "Age", y = "Scaled Beta Values") +
+    theme_minimal()
+
+ print(a)
+}
+
+```
+
+
+Clock CpG enrichment
+
+```{r}
+library(RColorBrewer)
+
+clusters <- list(
+  cluster1 <- rownames(B_with_clusters)[which(B_with_clusters[, ncol(B_with_clusters)]==1)],
+  cluster2 <- rownames(B_with_clusters)[which(B_with_clusters[, ncol(B_with_clusters)]==2)],
+  cluster3 <- rownames(B_with_clusters)[which(B_with_clusters[, ncol(B_with_clusters)]==3)],
+  cluster4 <- rownames(B_with_clusters)[which(B_with_clusters[, ncol(B_with_clusters)]==4)]
+)
+
+cont_table <- data.frame(
+  clusters = character(),
+  hannum_clock_cpgs = integer(),
+  horvath_clock_cpgs = integer(),
+  levine_clock_cpgs = integer(),
+  mcewen_clock_cpgs = integer(),
+  wu_clock_cpgs = integer(),
+  belsky_clock_cpgs = integer(),
+  stringsAsFactors = FALSE
+)
+
+for (i in 1:num_clusters) {
+  cluster_cpgs <- clusters[[i]]
+  hannum_clock_cpgs <- sum(cluster_cpgs %in% Hannum_CpGs)
+  horvath_clock_cpgs <- sum(cluster_cpgs %in% Horvath_CpGs)
+  levine_clock_cpgs <- sum(cluster_cpgs %in% Levine_CpGs)
+  mcewen_clock_cpgs <- sum(cluster_cpgs %in% McEwen_CpGs)
+  wu_clock_cpgs <- sum(cluster_cpgs %in% Wu_CpGs)
+  belsky_clock_cpgs <- sum(cluster_cpgs %in% Belsky_CpGs)
+  
+  cont_table <- rbind(cont_table, data.frame(
+    Cluster = paste0("In Cluster ", i),
+    hannum_clock_cpgs = hannum_clock_cpgs,
+    horvath_clock_cpgs = horvath_clock_cpgs,
+    levine_clock_cpgs = levine_clock_cpgs,
+    mcewen_clock_cpgs = mcewen_clock_cpgs,
+    wu_clock_cpgs = wu_clock_cpgs,
+    belsky_clock_cpgs = belsky_clock_cpgs
+  ))
+  
+  cont_table <- rbind(cont_table, data.frame(
+    Cluster = paste0("Not In Cluster ", i),
+    hannum_clock_cpgs = length(Hannum_CpGs) - hannum_clock_cpgs,
+    horvath_clock_cpgs = length(Horvath_CpGs) - horvath_clock_cpgs,
+    levine_clock_cpgs = length(Levine_CpGs) - levine_clock_cpgs,
+    mcewen_clock_cpgs = length(McEwen_CpGs) - mcewen_clock_cpgs,
+    wu_clock_cpgs = length(Wu_CpGs) - wu_clock_cpgs,
+    belsky_clock_cpgs = length(Belsky_CpGs) - belsky_clock_cpgs
+  ))
+}
+
+#Fischer's exact test
+fischers <- function(cont_table, clock_name) {
+  p_values <- numeric(num_clusters)
+  for (i in 1:num_clusters) {
+    in_cluster <- cont_table[2*i-1, paste0(clock_name, "_clock_cpgs")]
+    not_in_cluster <- cont_table[2*i, paste0(clock_name, "_clock_cpgs")]
+    total_in_cluster <- sum(cont_table[2*i-1, -1])
+    total_not_in_cluster <- sum(cont_table[2*i, -1])
+    
+    matrix_m <- matrix(c(in_cluster, total_in_cluster - in_cluster,
+                        not_in_cluster, total_not_in_cluster - not_in_cluster),
+                      nrow=2)
+    
+    fisher_test <- fisher.test(matrix_m)
+    p_values[i] <- fisher_test$p.value
+  }
+  return(p_values)
+}
+
+p_values_hannum <- fischers(cont_table, "hannum")
+p_values_horvath <- fischers(cont_table, "horvath")
+p_values_levine <- fischers(cont_table, "levine")
+p_values_mcewen <- fischers(cont_table, "mcewen")
+p_values_wu <- fischers(cont_table, "wu")
+p_values_belsky <- fischers(cont_table, "belsky")
+
+all_p_values <- c(p_values_hannum, p_values_horvath, p_values_levine, p_values_mcewen, p_values_wu, p_values_belsky)
+
+#adjust for multiple comparisons
+adjusted_p_values <- p.adjust(all_p_values, method="BH")
+
+adjusted_p_values_hannum <- adjusted_p_values[1:num_clusters]
+adjusted_p_values_horvath <- adjusted_p_values[(num_clusters+1):(2*num_clusters)]
+adjusted_p_values_levine <- adjusted_p_values[(2*num_clusters+1):(3*num_clusters)]
+adjusted_p_values_mcewen <- adjusted_p_values[(3*num_clusters+1):(4*num_clusters)]
+adjusted_p_values_wu <- adjusted_p_values[(4*num_clusters+1):(5*num_clusters)]
+adjusted_p_values_belsky <- adjusted_p_values[(5*num_clusters+1):(6*num_clusters)]
+
+heatmap_data <- data.frame(
+  hannum = adjusted_p_values_hannum,
+  horvath = adjusted_p_values_horvath,
+  levine = adjusted_p_values_levine,
+  mcewen = adjusted_p_values_mcewen,
+  wu = adjusted_p_values_wu,
+  belsky = adjusted_p_values_belsky
+)
+rownames(heatmap_data) <- paste("Cluster", 1:num_clusters)
+
+annotation_matrix <- matrix("", nrow=num_clusters, ncol=6)
+colnames(annotation_matrix) <- colnames(heatmap_data)
+rownames(annotation_matrix) <- rownames(heatmap_data)
+
+for (i in 1:num_clusters) {
+  for (j in 1:6) {
+    if (heatmap_data[i, j] < 0.001) {
+      annotation_matrix[i, j] <- "***"
+    } else if (heatmap_data[i, j] < 0.01) {
+      annotation_matrix[i, j] <- "**"
+    } else if (heatmap_data[i, j] < 0.05) {
+      annotation_matrix[i, j] <- "*"
+    }
+  }
+}
+
+pheatmap(
+  -log10(heatmap_data),
+  cluster_rows = FALSE,
+  cluster_cols = FALSE,
+  display_numbers = annotation_matrix,
+  number_color = "black",
+  color = colorRampPalette(rev(brewer.pal(n = 7, name = "RdYlBu")))(100),
+  main = "-log10 Adjusted P-Values for CpG Enrichment in Clusters",
+)
+
+```
+
+Biological function enrichment
+
+```{r}
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(ReactomePA)
+library(tidyverse)
+
+clusters <- list(
+  cluster1 <- rownames(B_with_clusters)[which(B_with_clusters[, ncol(B_with_clusters)]==1)],
+  cluster2 <- rownames(B_with_clusters)[which(B_with_clusters[, ncol(B_with_clusters)]==2)],
+  cluster3 <- rownames(B_with_clusters)[which(B_with_clusters[, ncol(B_with_clusters)]==3)],
+  cluster4 <- rownames(B_with_clusters)[which(B_with_clusters[, ncol(B_with_clusters)]==4)]
+)
+
+kegg_results <- data.frame()
+reactome_results <- data.frame()
+go_bp_results <- data.frame()
+go_cc_results <- data.frame()
+go_mf_results <- data.frame()
+
+annotation <- read.table("HM450.hg38.manifest.gencode.v36.tsv/HM450.hg38.manifest.gencode.v36.tsv", sep="\t", header=TRUE, quote="", comment.char="", fileEncoding = "UTF-8")
+rownames(annotation) <- annotation$probeID
+
+enrich <- function(sig_cpg) {
+  temp_ann <- annotation[sig_cpg, ]
+  genes <- temp_ann$genesUniq
+  genes <- as.data.frame(genes)
+  genes_unlist <- genes %>%
+    separate_rows(genes, sep=";") %>%
+    distinct()
+  genes_unlist <- na.omit(genes_unlist)
+  genes <- unlist(genes_unlist)
+  
+  #clean up gene version
+  genes <- gsub("\\..*", "", genes)
+  
+  # lose some IDs when mapping
+  gene_list <- bitr(genes, fromType="SYMBOL", toType="ENTREZID", OrgDb="org.Hs.eg.db")
+  entrez_ids <- gene_list$ENTREZID
+  
+  kegg_enrichment <- as.data.frame(enrichKEGG(gene = entrez_ids, organism = "hsa", pvalueCutoff = 0.05))
+  reactome_enrichment <- as.data.frame(enrichPathway(gene = entrez_ids, pvalueCutoff = 0.05, readable = TRUE))
+  go_bp <- as.data.frame(enrichGO(gene = genes, OrgDb = org.Hs.eg.db, keyType = "SYMBOL", 
+                      ont = "BP", pAdjustMethod = "BH", pvalueCutoff = 0.05))
+  go_cc <- as.data.frame(enrichGO(gene = genes, OrgDb = org.Hs.eg.db, keyType = "SYMBOL", 
+                      ont = "CC", pAdjustMethod = "BH", pvalueCutoff = 0.05))
+  go_mf <- as.data.frame(enrichGO(gene = genes, OrgDb = org.Hs.eg.db, keyType = "SYMBOL", 
+                      ont = "MF", pAdjustMethod = "BH", pvalueCutoff = 0.05))
+  
+  if (nrow(kegg_enrichment)>0) {
+    kegg_enrichment$Cluster <- cluster_name
+  } 
+  if (nrow(reactome_enrichment)>0) {
+    reactome_enrichment$Cluster <- cluster_name
+  }
+  if (nrow(go_bp)>0) {
+    go_bp$Cluster <- cluster_name
+  } 
+  if (nrow(go_cc)>0) {
+    go_cc$Cluster <- cluster_name
+  }
+  if (nrow(go_mf)>0) {
+    go_mf$Cluster <- cluster_name
+  } 
+  return(list(kegg=kegg_enrichment, reactome=reactome_enrichment, bp=go_bp, cc=go_cc, mf=go_mf))
+}
+
+for (i in 1:length(clusters)) {
+  cluster_name <- paste0("Cluster ", i)
+  sig_cpg <- unlist(clusters[i])
+  enrichment_results <- enrich(sig_cpg)
+  
+  kegg_results <- rbind(kegg_results, enrichment_results$kegg)
+  reactome_results <- rbind(reactom_results, enrichment_results$reactome)
+  go_bp_results <- rbind(kegg_results, enrichment_results$kegg)
+  go_cc_results <- rbind(reactom_results, enrichment_results$reactome)
+  kegg_results <- rbind(kegg_results, enrichment_results$kegg)
+}
+
+top_kegg <- kegg_results %>%
+  group_by(Cluster) %>%
+  top_n(-10, p.adjust)
+
+ggplot(top_kegg, aes(x = reorder(Description, -p.adjust), y = -log10(p.adjust), fill = Cluster)) +
+  geom_bar(stat = "identity", position = position_dodge()) +
+  coord_flip() +
+  labs(title = "KEGG Pathway Enrichment", x = "Pathway", y = "-log10(p.adjust)") +
+  theme_minimal()
+
+top_reactome <- reactome_results %>%
+  group_by(Cluster) %>%
+  top_n(-10, p.adjust)
+
+ggplot(top_reactome, aes(x = reorder(Description, -p.adjust), y = Cluster, size = -log10(p.adjust), color = Cluster)) +
+  geom_point() +
+  coord_flip() +
+  labs(title = "Reactome Pathway Enrichment", x = "Pathway", y = "Cluster") +
+  theme_minimal()
+```
+
+
+- try other numbers of clusters, 4 seems optimal, NA problem
+- include GrimAge ?? can't find
+- draft methods section
+- within each cluster, are there enrichment of CpGs with biological function
+- do other CpGs not in these clocks have similar patterns ??
+
+
+BELOW IS OLD CODE
+
+Reformat new matrix
+- Remove ages 0, 1, 2 because values are very sparse
+- use linear interpolation for the rest of them to preserve patterns (removing all NAs reduces the list of CpGs down to 267 out of 1074)
+- also, for some sites missing values at ages, 87-96, so filled in with last value (only for clustering)
+- Heatmap is plotted without any interpolation
+```{r}
+"""
+library(zoo)
+B <- readr::read_csv("6_27_small_matrix.csv")
+B <- B[, colSums(is.na(B)) != nrow(B)]
+cpg_site_names <- B[[1]]
+B <- B[, -1, with = FALSE]
+B <- as.data.frame(B)
+rownames(B) <- cpg_site_names
+B <- B[, -(1:3)]
+B_interpolated <- data.frame(t(apply(B, 1, function(x) {
+    interpolated <- na.approx(x, na.rm = FALSE) 
+    first_non_na <- which(!is.na(interpolated))[1]
+    if (!is.na(first_non_na)) {
+        interpolated[1:first_non_na] <- interpolated[first_non_na]
+    }
+    last_non_na <- which(!is.na(interpolated))[length(which(!is.na(interpolated)))]
+    if (!is.na(last_non_na)) {
+        interpolated[last_non_na:length(interpolated)] <- interpolated[last_non_na]
+    }
+    return(interpolated)
+})))
+colnames(B_interpolated) <- colnames(B)
+#scale
+scaled_B <- t(scale(t(B_interpolated)))
+df <- as.data.frame(scaled_B)
+"""
+```
+
+Hierarchical Clustering
+
+```{r}
+"""
+d <- dist(df, method = "euclidean")  # Compute the distance matrix
+hc <- hclust(d, method = "ward.D2")  # Perform hierarchical clustering
+
+# Plot the dendrogram
+plot(hc, main = "Dendrogram", xlab = "Sample index", ylab = "Height")
+"""
+```
+```{r}
+"""
+clusters <- cutree(hc, k = 4)
+df$Cluster <- as.factor(clusters)
+df <- df[order(df$Cluster), ]
+row_order <- rownames(df)
+
+scaledB <- t(scale(t(B)))
+df2 <- as.data.frame(scaledB)
+original <- df2[row_order, ]
+"""
+```
+
+Simple heatmap
+
+```{r}
+"""
+library(pheatmap)
+pheatmap(as.matrix(original),  # Exclude cluster column
+         scale = "none",
+         show_rownames = FALSE,
+         show_colnames = TRUE,
+         cluster_cols = FALSE,
+         cluster_rows = FALSE,
+         color = colorRampPalette(c("blue", "white", "red"))(100),
+         fontsize_col = 6,
+         angle_col = 45,
+         main="Clock CpGs",
+         breaks = seq(-5, 5, length.out = 101)
+)
+"""
+```
+
+Read annotations
+
+```{r}
+```
+
+
+
+
